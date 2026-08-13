@@ -78,9 +78,6 @@ class PaperLedger:
         decisions = self.state.setdefault("decisions", [])
         if any(item.get("decision_id") == decision_id for item in decisions):
             raise ValueError("决策编号已经存在，历史决策禁止覆盖")
-        if any(item.get("decision_date") == decision_date and self.decision_status(item.get("decision_id", "")) == "ACTIVE"
-               for item in decisions):
-            raise ValueError(f"{decision_date} 已有正式决策，当天不重复记录阶段性思考")
         if not market_observation.strip() or not reason.strip():
             raise ValueError("市场观察和决策理由不能为空")
         if not user_confirmation.strip():
@@ -111,14 +108,16 @@ class PaperLedger:
         if any(item.get("annotation_id") == annotation_id for item in annotations):
             raise ValueError("决策标记编号已经存在，历史标记禁止覆盖")
         normalized_status = status.upper()
-        if normalized_status not in {"ACTIVE", "VOIDED_DUPLICATE", "VOIDED_SUPERSEDED"}:
+        if normalized_status not in {"ACTIVE", "VOIDED", "VOIDED_DUPLICATE", "VOIDED_SUPERSEDED", "SUPERSEDED"}:
             raise ValueError("不支持的决策标记状态")
         if not reason.strip() or not user_confirmation.strip():
             raise ValueError("作废理由和用户确认信息不能为空")
-        if normalized_status in {"VOIDED_DUPLICATE", "VOIDED_SUPERSEDED"} and any(
-            order.get("decision_id") == decision_id for order in self.state.get("orders", [])
-        ):
-            raise ValueError("已关联订单的决策不能标记为重复思考")
+        linked_orders = [order for order in self.state.get("orders", [])
+                         if order.get("decision_id") == decision_id]
+        if normalized_status in {"VOIDED_DUPLICATE", "VOIDED_SUPERSEDED", "SUPERSEDED"} and linked_orders:
+            raise ValueError("已关联订单的决策不能标记为重复或被替代")
+        if normalized_status == "VOIDED" and any(order.get("status") != "CANCELLED" for order in linked_orders):
+            raise ValueError("关联订单必须先撤销；已成交订单应通过新的反向决策处理")
         record = {
             "annotation_id": annotation_id,
             "decision_id": decision_id,
@@ -280,6 +279,33 @@ class PaperLedger:
         self.save("ORDER_REGISTERED", {"order_id": order_id, "side": "SELL", "nav_date": nav_date,
                                        "confirmation_date": confirmation_date, "fund_code": code,
                                        "shares": str(shares)})
+
+    def cancel_order(self, order_id: str, reason: str, user_confirmation: str) -> dict:
+        """Cancel an unsettled order while preserving the original order and audit trail."""
+        if not reason.strip() or not user_confirmation.strip():
+            raise ValueError("cancellation reason and user confirmation are required")
+        order = next((item for item in self.state.get("orders", []) if item.get("order_id") == order_id), None)
+        if order is None:
+            raise ValueError("order does not exist")
+        if order.get("status") != "PENDING_NAV":
+            raise ValueError("only unsettled PENDING_NAV orders can be cancelled")
+        if order.get("side") == "BUY":
+            amount = Decimal(order["gross_amount"])
+            self.state["cash_frozen"] = str(qmoney(Decimal(self.state["cash_frozen"]) - amount))
+            self.state["cash_available"] = str(qmoney(Decimal(self.state["cash_available"]) + amount))
+        elif order.get("side") == "SELL":
+            position = self.state.get("positions", {}).get(order["fund_code"])
+            if position is None:
+                raise ValueError("position for pending sell does not exist")
+            position["shares_frozen"] = str(qshares(Decimal(position.get("shares_frozen", "0")) - Decimal(order["shares"])))
+        else:
+            raise ValueError("unsupported order side")
+        order["status"] = "CANCELLED"
+        order["cancelled_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+        payload = {"order_id": order_id, "side": order["side"], "reason": reason.strip(),
+                   "user_confirmation": user_confirmation.strip()}
+        self.save("ORDER_CANCELLED", payload)
+        return {**order, "cancellation": payload}
 
     @staticmethod
     def _redemption_rate(held_days: int, schedule: list[dict]) -> Decimal:

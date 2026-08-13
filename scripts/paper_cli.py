@@ -35,7 +35,8 @@ def main():
     decision.add_argument("--user-confirmation", required=True)
     annotation = sub.add_parser("annotate-decision")
     annotation.add_argument("--id", required=True); annotation.add_argument("--decision-id", required=True)
-    annotation.add_argument("--status", required=True, choices=["ACTIVE", "VOIDED_DUPLICATE", "VOIDED_SUPERSEDED"])
+    annotation.add_argument("--status", required=True,
+                            choices=["ACTIVE", "VOIDED", "VOIDED_DUPLICATE", "VOIDED_SUPERSEDED", "SUPERSEDED"])
     annotation.add_argument("--reason", required=True); annotation.add_argument("--user-confirmation", required=True)
     value = sub.add_parser("value"); value.add_argument("--date", required=True)
     checkpoint = sub.add_parser("checkpoint"); checkpoint.add_argument("--reason", required=True)

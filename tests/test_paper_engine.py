@@ -93,6 +93,44 @@ def test_same_day_decision_can_be_superseded_without_an_order(tmp_path):
     assert ledger.decision_status("D2") == "ACTIVE"
 
 
+def test_multiple_active_decisions_are_allowed_on_one_day(tmp_path):
+    ledger = PaperLedger(tmp_path / "state.json")
+    ledger.initialize("2026-07-22", "2026-08-21", Decimal("100000"))
+    ledger.record_decision("D1", "2026-07-22", "WATCH", "morning", "wait", 55,
+                           user_confirmation="confirm morning")
+    second = ledger.record_decision("D2", "2026-07-22", "BUY", "afternoon", "new evidence", 66,
+                                    user_confirmation="confirm afternoon")
+    assert second["decision_id"] == "D2"
+    assert ledger.decision_status("D1") == "ACTIVE"
+    assert ledger.decision_status("D2") == "ACTIVE"
+
+
+def test_pending_order_can_be_cancelled_with_audit(tmp_path):
+    ledger = PaperLedger(tmp_path / "state.json")
+    ledger.initialize("2026-07-22", "2026-08-21", Decimal("100000"))
+    ledger.register_buy("B1", "2026-07-22", "2026-07-23", "2026-07-24",
+                        "018099", "test", Decimal("20000"), Decimal("0"), [], "test")
+    cancelled = ledger.cancel_order("B1", "user changed plan", "confirm cancel")
+    assert cancelled["status"] == "CANCELLED"
+    assert ledger.summary()["cash_available"] == "100000.00"
+    assert ledger.summary()["cash_frozen"] == "0.00"
+    assert ledger.verify_audit()["valid"] is True
+
+
+def test_decision_with_cancelled_order_can_be_voided(tmp_path):
+    ledger = PaperLedger(tmp_path / "state.json")
+    ledger.initialize("2026-07-22", "2026-08-21", Decimal("100000"))
+    ledger.record_decision("D1", "2026-07-22", "BUY", "signal", "test", 65,
+                           user_confirmation="confirm decision")
+    ledger.register_buy("B1", "2026-07-22", "2026-07-23", "2026-07-24",
+                        "018099", "test", Decimal("20000"), Decimal("0"), [], "test", "D1")
+    with pytest.raises(ValueError):
+        ledger.annotate_decision("A1", "D1", "VOIDED", "cancel plan", "confirm void")
+    ledger.cancel_order("B1", "cancel plan", "confirm cancel")
+    annotation = ledger.annotate_decision("A2", "D1", "VOIDED", "cancel plan", "confirm void")
+    assert annotation["status"] == "VOIDED"
+
+
 def test_buy_uses_nav_date_before_confirmation_date(tmp_path, monkeypatch):
     ledger = PaperLedger(tmp_path / "state.json")
     ledger.initialize("2026-07-22", "2026-08-21", Decimal("100000"))

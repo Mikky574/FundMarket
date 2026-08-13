@@ -21,6 +21,7 @@ from app.user_trading import (BuyOrder, Credentials, SellOrder, cancel_order, cr
                               create_sell, current_user, login, logout, portfolio, preset_position, register,
                               PresetPosition)
 from app import user_ai
+from app import public_ai_control
 from pydantic import BaseModel, Field
 
 app = FastAPI(
@@ -81,6 +82,54 @@ def user_preset_position(position: PresetPosition, user: dict = Depends(current_
 
 class UserAiPrompt(BaseModel):
     prompt: str = Field(min_length=1, max_length=4000)
+
+
+class PublicAiDecisionRequest(BaseModel):
+    decision_id: str | None = None
+    decision_date: str | None = None
+    data_as_of: str | None = None
+    action: str
+    market_observation: str
+    reason: str
+    confidence: int = Field(ge=0, le=100)
+    evidence: list[str] = []
+    counter_evidence: str = ""
+    invalidation_conditions: str = ""
+    user_confirmation: str
+
+
+class PublicAiAnnotationRequest(BaseModel):
+    annotation_id: str | None = None
+    status: str = "VOIDED"
+    reason: str
+    user_confirmation: str
+
+
+class PublicAiOrderRequest(BaseModel):
+    order_id: str | None = None
+    decision_id: str
+    decision_date: str | None = None
+    fund_code: str
+    fund_name: str | None = None
+    amount: str | None = None
+    shares: str | None = None
+    subscription_fee_rate: str = "0"
+    thesis: str
+    evidence: list[str] = []
+
+
+class PublicAiSettleRequest(BaseModel):
+    as_of: str
+
+
+class PublicAiCancelOrderRequest(BaseModel):
+    reason: str
+    user_confirmation: str
+
+
+def _require_local_bridge(request: Request) -> None:
+    if request.client is None or request.client.host not in {"127.0.0.1", "::1"}:
+        raise HTTPException(403, "local bridge only")
 
 
 @app.get("/api/v1/user/ai", tags=["user ai"])
@@ -182,8 +231,7 @@ def research_watchlist():
 @app.post("/api/v1/internal/market-refresh", include_in_schema=False)
 async def refresh_public_market_display(request: Request):
     """Local QQ bridge refresh: research/display artifacts only, never ledger state."""
-    if request.client is None or request.client.host not in {"127.0.0.1", "::1"}:
-        raise HTTPException(403, "local bridge only")
+    _require_local_bridge(request)
     try:
         refreshed = await run_in_threadpool(refresh_public_market_artifacts)
         dashboard = get_portfolio_dashboard()
@@ -191,6 +239,105 @@ async def refresh_public_market_display(request: Request):
                 "summary": dashboard.get("summary"), "positions": dashboard.get("positions")}
     except Exception as exc:
         raise HTTPException(502, f"market refresh failed: {exc}") from exc
+
+
+@app.get("/api/v1/internal/public-ai/portfolio", include_in_schema=False)
+def public_ai_portfolio(request: Request):
+    _require_local_bridge(request)
+    return public_ai_control.portfolio()
+
+
+@app.get("/api/v1/internal/public-ai/decisions", include_in_schema=False)
+def public_ai_decisions(request: Request):
+    _require_local_bridge(request)
+    return {"items": public_ai_control.decisions()}
+
+
+@app.get("/api/v1/internal/public-ai/orders", include_in_schema=False)
+def public_ai_orders(request: Request):
+    _require_local_bridge(request)
+    return {"items": public_ai_control.orders()}
+
+
+@app.post("/api/v1/internal/public-ai/decisions", include_in_schema=False)
+def public_ai_record_decision(payload: PublicAiDecisionRequest, request: Request):
+    _require_local_bridge(request)
+    try:
+        return public_ai_control.record_decision(payload.model_dump())
+    except (LookupError, ValueError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/api/v1/internal/public-ai/decisions/{decision_id}/void", include_in_schema=False)
+def public_ai_void_decision(decision_id: str, payload: PublicAiAnnotationRequest, request: Request):
+    _require_local_bridge(request)
+    try:
+        return public_ai_control.void_decision(decision_id, payload.model_dump())
+    except (LookupError, ValueError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/api/v1/internal/public-ai/orders/buy", include_in_schema=False)
+def public_ai_buy(payload: PublicAiOrderRequest, request: Request):
+    _require_local_bridge(request)
+    try:
+        return public_ai_control.buy(payload.model_dump())
+    except (LookupError, ValueError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/api/v1/internal/public-ai/orders/add", include_in_schema=False)
+def public_ai_add(payload: PublicAiOrderRequest, request: Request):
+    _require_local_bridge(request)
+    try:
+        return public_ai_control.buy(payload.model_dump())
+    except (LookupError, ValueError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/api/v1/internal/public-ai/orders/reduce", include_in_schema=False)
+def public_ai_reduce(payload: PublicAiOrderRequest, request: Request):
+    _require_local_bridge(request)
+    try:
+        return public_ai_control.sell(payload.model_dump())
+    except (LookupError, ValueError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/api/v1/internal/public-ai/orders/sell", include_in_schema=False)
+def public_ai_sell(payload: PublicAiOrderRequest, request: Request):
+    _require_local_bridge(request)
+    try:
+        return public_ai_control.sell(payload.model_dump())
+    except (LookupError, ValueError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/api/v1/internal/public-ai/orders/liquidate/{fund_code}", include_in_schema=False)
+def public_ai_liquidate(fund_code: str, payload: PublicAiOrderRequest, request: Request):
+    _require_local_bridge(request)
+    try:
+        return public_ai_control.liquidate(fund_code, payload.model_dump())
+    except (LookupError, ValueError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/api/v1/internal/public-ai/orders/{order_id}/cancel", include_in_schema=False)
+def public_ai_cancel_order(order_id: str, payload: PublicAiCancelOrderRequest, request: Request):
+    _require_local_bridge(request)
+    try:
+        return public_ai_control.cancel_order(order_id, payload.model_dump())
+    except (LookupError, ValueError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/api/v1/internal/public-ai/orders/settle", include_in_schema=False)
+def public_ai_settle(payload: PublicAiSettleRequest, request: Request):
+    _require_local_bridge(request)
+    try:
+        return public_ai_control.settle(payload.as_of)
+    except (LookupError, ValueError) as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 @app.get("/fund", include_in_schema=False)

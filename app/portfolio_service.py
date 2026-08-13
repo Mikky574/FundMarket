@@ -98,10 +98,11 @@ def get_portfolio_dashboard() -> dict:
     effective_status: dict[str, str] = {}
     for annotation in state.get("decision_annotations", []):
         effective_status[annotation.get("decision_id")] = annotation.get("status", "ACTIVE")
-    decisions = [
-        item for item in state.get("decisions", [])
-        if effective_status.get(item.get("decision_id"), "ACTIVE") == "ACTIVE"
-    ]
+    decisions = []
+    for item in state.get("decisions", []):
+        decision = dict(item)
+        decision["status"] = effective_status.get(item.get("decision_id"), "ACTIVE")
+        decisions.append(decision)
     known_ids = {item.get("decision_id") for item in decisions}
     for order in orders:
         decision_id = order.get("decision_id") or f"legacy-{order.get('order_id')}"
@@ -134,15 +135,6 @@ def get_portfolio_dashboard() -> dict:
                 "description": "继续持有，本次未产生买卖订单",
             }]
     decisions.sort(key=lambda item: (item.get("decision_date", ""), item.get("recorded_at", "")), reverse=True)
-    # The journal is a daily summary, not an intraday stream of working notes.
-    daily_decisions = []
-    seen_dates = set()
-    for decision in decisions:
-        decision_date = decision.get("decision_date")
-        if decision_date in seen_dates:
-            continue
-        seen_dates.add(decision_date)
-        daily_decisions.append(decision)
     return {
         "status": state.get("status", "UNKNOWN"),
         "period": {"start": state.get("start_date"), "end": state.get("end_date"), "as_of": latest.get("date")},
@@ -168,6 +160,6 @@ def get_portfolio_dashboard() -> dict:
         "positions": positions,
         "valuations": valuations,
         "orders": orders,
-        "decisions": daily_decisions,
+        "decisions": decisions,
         "benchmarks": benchmark_records,
     }
