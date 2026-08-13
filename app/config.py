@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     # 数据库使用与项目位置无关的绝对目录；不同应用使用各自子目录。
     database_root: str = r"D:\应用数据库\市场分析"
     user_ai_root: str = r"D:\应用数据库\市场分析\user_ai"
+    # Historical evaluation data is deliberately outside the production ledger.
+    evaluation_data_root: str = r"D:\应用数据库\市场分析\evaluation_data"
     codex_command: str = "codex"
     # 独立 AI 使用单独的高能力推理配置，不继承桌面端的低推理默认值。
     user_ai_codex_model: str = "gpt-5.6-sol"
