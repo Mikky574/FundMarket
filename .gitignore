@@ -1,0 +1,32 @@
+__pycache__/
+.pytest_cache/
+.pytest-*/
+.venv/
+.env
+*.pyc
+
+# Credentials and local configuration
+.env.*
+!.env.example
+*.pem
+*.key
+*secret*
+*token*
+*credential*
+
+# Local runtime data, ledgers, caches, and generated research
+runtime-logs/
+market_intelligence/
+research_evaluation_lab/
+paper/state.json
+paper/state.audit.jsonl
+paper/reports/
+paper/observations/
+paper/decisions/
+paper/data/
+*.sqlite
+*.sqlite3
+
+# Local agent and test artefacts
+.codex/
+.pytest-*/

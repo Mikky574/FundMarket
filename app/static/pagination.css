@@ -1,0 +1,5 @@
+.pager{display:flex;justify-content:center;align-items:center;gap:16px;margin:18px 0 28px;color:var(--muted);font-size:12px}
+.pager button{border:1px solid var(--line);border-radius:9px;background:#fff;color:var(--ink);padding:9px 16px;font-weight:700;cursor:pointer}
+.pager button:hover:not(:disabled){border-color:#82b9a2;color:var(--green)}
+.pager button:disabled{opacity:.4;cursor:not-allowed}
+.pager b{color:var(--ink)}
