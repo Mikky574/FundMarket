@@ -16,6 +16,7 @@ scripts/evaluation_sources.json
 *credential*
 
 # Local runtime data, ledgers, caches, and generated research
+data/
 runtime-logs/
 market_intelligence/
 research_evaluation_lab/
