@@ -8,6 +8,7 @@ __pycache__/
 # Credentials and local configuration
 .env.*
 !.env.example
+scripts/evaluation_sources.json
 *.pem
 *.key
 *secret*

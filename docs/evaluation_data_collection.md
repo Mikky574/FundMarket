@@ -50,6 +50,18 @@
 基准和行业收盘值按收盘后 18:00 才对回放可见；基金净值按 20:00 才对回放可见。
 如果数据源不可访问，脚本会失败而不写入不完整或猜测的数据，稍后重试即可。
 
+## 一键批处理
+
+复制 `scripts/evaluation_sources.example.json` 为
+`scripts/evaluation_sources.json`，按需要补充基金、行业和 RSS 来源后运行：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\collect_evaluation_dataset.py
+```
+
+批处理会分别报告基金、指数和 RSS 的成功状态；任一上游来源失败不会覆盖已有
+记录，修复来源后可安全重跑。
+
 ## 使用约束
 
 评估 API 只返回指定 `as_of` 当天已经可见的行情与新闻。未来净值仅由评分接口
