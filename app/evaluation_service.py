@@ -33,8 +33,9 @@ def _write_new(path: Path, value: dict) -> None:
         existing_comparable = {key: item for key, item in existing.items() if key != "imported_at"}
         if existing_comparable != comparable:
             raise ValueError(f"immutable record already exists: {path.name}")
-        return
+        return False
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
+    return True
 
 
 def _parse_available(value: str) -> datetime:
@@ -49,7 +50,7 @@ def _parse_available(value: str) -> datetime:
 
 def import_market(rows: list[dict]) -> dict:
     """Import daily closes. `available_at` means when this value became visible."""
-    recorded = 0
+    created = existing = 0
     for raw in rows:
         instrument, as_of, close, available_at = (str(raw.get(key, "")) for key in
                                                    ("instrument", "as_of", "close", "available_at"))
@@ -64,14 +65,16 @@ def import_market(rows: list[dict]) -> dict:
                    "close": close, "available_at": available_at,
                    "source": str(raw.get("source") or "unspecified"),
                    "imported_at": datetime.now().astimezone().isoformat(timespec="seconds")}
-        _write_new(_root() / "market" / f"{instrument}_{as_of}.json", payload)
-        recorded += 1
-    return {"recorded": recorded}
+        if _write_new(_root() / "market" / f"{instrument}_{as_of}.json", payload):
+            created += 1
+        else:
+            existing += 1
+    return {"created": created, "existing": existing, "total": created + existing}
 
 
 def import_news(items: list[dict]) -> dict:
     """Import dated news. Undated news is rejected to prevent future leakage."""
-    recorded = 0
+    created = existing = 0
     for raw in items:
         title, body, source, available_at = (str(raw.get(key, "")).strip() for key in
                                               ("title", "body", "source", "available_at"))
@@ -87,9 +90,11 @@ def import_news(items: list[dict]) -> dict:
                    "event_type": str(raw.get("event_type") or "other"),
                    "reliability": str(raw.get("reliability") or "secondary"),
                    "dedupe_hash": hashlib.sha256(canonical.encode("utf-8")).hexdigest()}
-        _write_new(_root() / "news" / f"{news_id}.json", payload)
-        recorded += 1
-    return {"recorded": recorded}
+        if _write_new(_root() / "news" / f"{news_id}.json", payload):
+            created += 1
+        else:
+            existing += 1
+    return {"created": created, "existing": existing, "total": created + existing}
 
 
 def _visible(as_of: str) -> tuple[list[dict], list[dict]]:
