@@ -23,6 +23,7 @@ from app.user_trading import (BuyOrder, Credentials, SellOrder, cancel_order, cr
 from app import user_ai
 from app import public_ai_control
 from app import evaluation_service
+from app.api.internal import router as internal_router
 from pydantic import BaseModel, Field
 
 app = FastAPI(
@@ -32,6 +33,7 @@ app = FastAPI(
 )
 service = StockService(AkShareProvider())
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
+app.include_router(internal_router)
 
 
 def get_service() -> StockService:
@@ -252,7 +254,6 @@ def research_watchlist():
     return market_watchlist()
 
 
-@app.post("/api/v1/internal/market-refresh", include_in_schema=False)
 async def refresh_public_market_display(request: Request):
     """Local QQ bridge refresh: research/display artifacts only, never ledger state."""
     _require_local_bridge(request)
@@ -265,25 +266,21 @@ async def refresh_public_market_display(request: Request):
         raise HTTPException(502, f"market refresh failed: {exc}") from exc
 
 
-@app.get("/api/v1/internal/public-ai/portfolio", include_in_schema=False)
 def public_ai_portfolio(request: Request):
     _require_local_bridge(request)
     return public_ai_control.portfolio()
 
 
-@app.get("/api/v1/internal/public-ai/decisions", include_in_schema=False)
 def public_ai_decisions(request: Request):
     _require_local_bridge(request)
     return {"items": public_ai_control.decisions()}
 
 
-@app.get("/api/v1/internal/public-ai/orders", include_in_schema=False)
 def public_ai_orders(request: Request):
     _require_local_bridge(request)
     return {"items": public_ai_control.orders()}
 
 
-@app.post("/api/v1/internal/public-ai/decisions", include_in_schema=False)
 def public_ai_record_decision(payload: PublicAiDecisionRequest, request: Request):
     _require_local_bridge(request)
     try:
@@ -292,7 +289,6 @@ def public_ai_record_decision(payload: PublicAiDecisionRequest, request: Request
         raise HTTPException(422, str(exc)) from exc
 
 
-@app.post("/api/v1/internal/public-ai/decisions/{decision_id}/void", include_in_schema=False)
 def public_ai_void_decision(decision_id: str, payload: PublicAiAnnotationRequest, request: Request):
     _require_local_bridge(request)
     try:
@@ -301,7 +297,6 @@ def public_ai_void_decision(decision_id: str, payload: PublicAiAnnotationRequest
         raise HTTPException(422, str(exc)) from exc
 
 
-@app.post("/api/v1/internal/public-ai/orders/buy", include_in_schema=False)
 def public_ai_buy(payload: PublicAiOrderRequest, request: Request):
     _require_local_bridge(request)
     try:
@@ -310,7 +305,6 @@ def public_ai_buy(payload: PublicAiOrderRequest, request: Request):
         raise HTTPException(422, str(exc)) from exc
 
 
-@app.post("/api/v1/internal/public-ai/orders/add", include_in_schema=False)
 def public_ai_add(payload: PublicAiOrderRequest, request: Request):
     _require_local_bridge(request)
     try:
@@ -319,7 +313,6 @@ def public_ai_add(payload: PublicAiOrderRequest, request: Request):
         raise HTTPException(422, str(exc)) from exc
 
 
-@app.post("/api/v1/internal/public-ai/orders/reduce", include_in_schema=False)
 def public_ai_reduce(payload: PublicAiOrderRequest, request: Request):
     _require_local_bridge(request)
     try:
@@ -328,7 +321,6 @@ def public_ai_reduce(payload: PublicAiOrderRequest, request: Request):
         raise HTTPException(422, str(exc)) from exc
 
 
-@app.post("/api/v1/internal/public-ai/orders/sell", include_in_schema=False)
 def public_ai_sell(payload: PublicAiOrderRequest, request: Request):
     _require_local_bridge(request)
     try:
@@ -337,7 +329,6 @@ def public_ai_sell(payload: PublicAiOrderRequest, request: Request):
         raise HTTPException(422, str(exc)) from exc
 
 
-@app.post("/api/v1/internal/public-ai/orders/liquidate/{fund_code}", include_in_schema=False)
 def public_ai_liquidate(fund_code: str, payload: PublicAiOrderRequest, request: Request):
     _require_local_bridge(request)
     try:
@@ -346,7 +337,6 @@ def public_ai_liquidate(fund_code: str, payload: PublicAiOrderRequest, request: 
         raise HTTPException(422, str(exc)) from exc
 
 
-@app.post("/api/v1/internal/public-ai/orders/{order_id}/cancel", include_in_schema=False)
 def public_ai_cancel_order(order_id: str, payload: PublicAiCancelOrderRequest, request: Request):
     _require_local_bridge(request)
     try:
@@ -355,7 +345,6 @@ def public_ai_cancel_order(order_id: str, payload: PublicAiCancelOrderRequest, r
         raise HTTPException(422, str(exc)) from exc
 
 
-@app.post("/api/v1/internal/public-ai/orders/settle", include_in_schema=False)
 def public_ai_settle(payload: PublicAiSettleRequest, request: Request):
     _require_local_bridge(request)
     try:
@@ -364,7 +353,6 @@ def public_ai_settle(payload: PublicAiSettleRequest, request: Request):
         raise HTTPException(422, str(exc)) from exc
 
 
-@app.post("/api/v1/internal/evaluation/market/import", include_in_schema=False)
 def evaluation_import_market(payload: EvaluationMarketImport, request: Request):
     _require_local_bridge(request)
     try:
@@ -373,7 +361,6 @@ def evaluation_import_market(payload: EvaluationMarketImport, request: Request):
         raise HTTPException(422, str(exc)) from exc
 
 
-@app.post("/api/v1/internal/evaluation/news/import", include_in_schema=False)
 def evaluation_import_news(payload: EvaluationNewsImport, request: Request):
     _require_local_bridge(request)
     try:
@@ -382,7 +369,6 @@ def evaluation_import_news(payload: EvaluationNewsImport, request: Request):
         raise HTTPException(422, str(exc)) from exc
 
 
-@app.post("/api/v1/internal/evaluation/sessions", include_in_schema=False)
 def evaluation_create_session(payload: EvaluationSessionRequest, request: Request):
     _require_local_bridge(request)
     try:
@@ -391,7 +377,6 @@ def evaluation_create_session(payload: EvaluationSessionRequest, request: Reques
         raise HTTPException(422, str(exc)) from exc
 
 
-@app.get("/api/v1/internal/evaluation/sessions/{session_id}", include_in_schema=False)
 def evaluation_get_session(session_id: str, request: Request):
     _require_local_bridge(request)
     try:
@@ -400,7 +385,6 @@ def evaluation_get_session(session_id: str, request: Request):
         raise HTTPException(404, str(exc)) from exc
 
 
-@app.post("/api/v1/internal/evaluation/sessions/{session_id}/predictions", include_in_schema=False)
 def evaluation_record_prediction(session_id: str, payload: EvaluationPredictionRequest, request: Request):
     _require_local_bridge(request)
     try:
@@ -411,7 +395,6 @@ def evaluation_record_prediction(session_id: str, payload: EvaluationPredictionR
         raise HTTPException(422, str(exc)) from exc
 
 
-@app.post("/api/v1/internal/evaluation/sessions/{session_id}/score", include_in_schema=False)
 def evaluation_score(session_id: str, request: Request):
     _require_local_bridge(request)
     try:
