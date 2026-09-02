@@ -14,3 +14,10 @@ def test_provider_verifiers_report_success_without_exposing_token(monkeypatch):
     monkeypatch.setattr(verifier, "_get_json", lambda *_args, **_kwargs: {"price": "1"})
     assert verifier.verify_tushare("not-printed")[0] is True
     assert verifier.verify_alpha_vantage("not-printed")[0] is True
+
+
+def test_tushare_permission_error_is_not_reported_as_invalid_token(monkeypatch):
+    monkeypatch.setattr(verifier, "_post_json", lambda *_args, **_kwargs: {"code": 40203})
+    ok, message = verifier.verify_tushare("not-printed")
+    assert ok is False
+    assert "does not prove the token is invalid" in message

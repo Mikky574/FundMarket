@@ -53,7 +53,7 @@ def _get_json(url: str, parameters: dict[str, str]) -> dict:
 
 
 def verify_tushare(token: str) -> tuple[bool, str]:
-    """Verify authentication only; minute-data entitlement remains provider-controlled."""
+    """Check the configured Tushare route without mistaking entitlement for a bad token."""
     try:
         response = _post_json(TUSHARE_URL, {
             "api_name": "fut_basic", "token": token, "params": {"exchange": "SHFE"},
@@ -64,6 +64,11 @@ def verify_tushare(token: str) -> tuple[bool, str]:
     code = response.get("code")
     if code == 0:
         return True, "authentication and basic SHFE futures access verified"
+    if code == 40203:
+        return False, (
+            "token reached Tushare but this account lacks fut_basic permission "
+            "(the provider currently requires at least 2000 points); this does not prove the token is invalid"
+        )
     return False, f"provider rejected the request (code={code!r})"
 
 
