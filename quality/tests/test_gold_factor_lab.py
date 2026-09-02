@@ -98,11 +98,12 @@ def test_blind_replay_hides_dates_and_fills_next_daily_quote():
     ]
     prompt = anonymised_prompt(rows[:20], in_position=False, rule=Decision("BUY", 0.7, "trend", "rule"))
     assert "2026-" not in prompt
-    calls = iter((Decision("BUY", 0.9, "confirm", "test"), Decision("SELL", 0.9, "protect", "test")))
+    calls = iter((Decision("BUY", 0.9, "confirm", "test", "UP", 0.9), Decision("SELL", 0.9, "protect", "test", "DOWN", 0.9)))
     result = replay(rows, trade_start=date(2026, 1, 1), decision_provider=lambda *_args: next(calls, Decision("HOLD", 0, "", "test")))
     assert result["trades"][0]["signal_day"] == "2026-01-21"
     assert result["trades"][0]["fill_day"] == "2026-01-22"
     assert result["fees_paid"] > 0
+    assert result["prediction_metrics"]["directional_calls"] > 0
 
 
 def test_third_prior_month_is_a_complete_month():

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from calendar import monthrange
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -16,10 +17,12 @@ from typing import Callable
 
 import httpx
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
 from demos.gold_factor_lab.collector import collect_factor_panel
 
 
-FEE_RATE = 0.004  # 0.4% for every purchase and sale.
+FEE_RATE = 0.004  # 0.4% charged only when selling.
 INITIAL_CASH = 100_000.0
 WARMUP_DAYS = 20
 
@@ -30,6 +33,8 @@ class Decision:
     confidence: float
     reason: str
     source: str
+    next_day_direction: str = "FLAT"
+    direction_confidence: float = 0.0
 
 
 def third_prior_month(reference: date) -> tuple[date, date]:
@@ -52,17 +57,17 @@ def rule_decision(history: list[dict], *, in_position: bool, held_days: int, coo
     """
     prices = [float(row["price"]) for row in history]
     if len(prices) < 12:
-        return Decision("HOLD", 0.0, "warm-up data is incomplete", "rule")
+        return Decision("HOLD", 0.0, "warm-up data is incomplete", "rule", "FLAT", 0.0)
     price, sma5, sma12 = prices[-1], _sma(prices, 5), _sma(prices, 12)
     momentum5 = price / prices[-6] - 1 if len(prices) >= 6 else 0.0
     drawdown10 = price / max(prices[-10:]) - 1
     trend_up = price > sma5 > sma12 and momentum5 >= 0.012 and drawdown10 >= -0.007
     trend_failed = (price < sma5 and momentum5 <= -0.008) or drawdown10 <= -0.016
     if not in_position and cooldown_days == 0 and trend_up:
-        return Decision("BUY", 0.65, "price above 5/12-day averages with >1.2% five-day momentum", "rule")
+        return Decision("BUY", 0.65, "price above 5/12-day averages with >1.2% five-day momentum", "rule", "UP", 0.65)
     if in_position and held_days >= 3 and trend_failed:
-        return Decision("SELL", 0.75, "trend failure exceeds the fee-noise buffer", "rule")
-    return Decision("HOLD", 0.4, "no fee-aware trend transition", "rule")
+        return Decision("SELL", 0.75, "trend failure exceeds the fee-noise buffer", "rule", "DOWN", 0.75)
+    return Decision("HOLD", 0.4, "no fee-aware trend transition", "rule", "FLAT", 0.4)
 
 
 def anonymised_prompt(history: list[dict], *, in_position: bool, rule: Decision) -> str:
@@ -82,7 +87,7 @@ def anonymised_prompt(history: list[dict], *, in_position: bool, rule: Decision)
     payload = {
         "experiment": "daily historical blind replay",
         "calendar_dates": "intentionally omitted",
-        "execution": "a decision after this row fills at the next observed daily quote; fee is 0.4% per side",
+        "execution": "a decision after this row fills at the next observed daily quote; sell fee is 0.4%, buy fee is zero",
         "position": "long_gold" if in_position else "cash",
         "rule_candidate": rule.action,
         "recent_observations": rows,
@@ -90,7 +95,7 @@ def anonymised_prompt(history: list[dict], *, in_position: bool, rule: Decision)
     return (
         "You are a constrained research classifier, not an investment adviser. "
         "Do not infer dates and do not ask for future data. Return JSON only: "
-        '{"action":"BUY|SELL|HOLD","confidence":0..1,"reason":"under 160 chars"}. '
+        '{"next_day_direction":"UP|DOWN|FLAT","direction_confidence":0..1,"action":"BUY|SELL|HOLD","confidence":0..1,"reason":"under 160 chars"}. '
         "BUY means move from cash to gold; SELL means move from gold to cash. "
         "Use only the sequential observations supplied below.\n"
         + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
@@ -108,7 +113,11 @@ def local_tool_decision(history: list[dict], *, in_position: bool, rule: Decisio
     if action not in {"BUY", "SELL", "HOLD"}:
         action = "HOLD"
     confidence = min(1.0, max(0.0, float(data.get("confidence", 0))))
-    return Decision(action, confidence, str(data.get("reason", "no reason"))[:160], "deepseek_tool")
+    direction = str(data.get("next_day_direction", "FLAT")).upper()
+    if direction not in {"UP", "DOWN", "FLAT"}:
+        direction = "FLAT"
+    direction_confidence = min(1.0, max(0.0, float(data.get("direction_confidence", 0))))
+    return Decision(action, confidence, str(data.get("reason", "no reason"))[:160], "deepseek_tool", direction, direction_confidence)
 
 
 def _daily_rows(panel: dict[str, list[dict]]) -> list[dict]:
@@ -145,12 +154,15 @@ def replay(rows: list[dict], *, trade_start: date, fee_rate: float = FEE_RATE,
         model = decision_provider(rows[:index + 1], grams > 0, rule)
         # The model may veto a rule entry or request a sufficiently confident
         # protective exit. An unsupported model BUY is never allowed.
-        action = "SELL" if rule.action == "SELL" or (grams > 0 and model.action == "SELL" and model.confidence >= 0.65) else ("BUY" if rule.action == "BUY" and model.action == "BUY" and model.confidence >= 0.55 else "HOLD")
+        action = "SELL" if rule.action == "SELL" or (grams > 0 and model.action == "SELL" and model.confidence >= 0.65 and model.next_day_direction == "DOWN") else ("BUY" if rule.action == "BUY" and model.action == "BUY" and model.confidence >= 0.55 and model.next_day_direction == "UP" else "HOLD")
+        next_return = float(fill["price"]) / float(row["price"]) - 1
+        actual_direction = "UP" if next_return > 0 else "DOWN" if next_return < 0 else "FLAT"
         decisions.append({"signal_day": row["observed_on"], "fill_day": fill["observed_on"], "rule": rule.action,
-                          "model": model.action, "model_confidence": model.confidence, "executed": action})
+                          "model": model.action, "model_confidence": model.confidence,
+                          "next_day_direction": model.next_day_direction, "direction_confidence": model.direction_confidence,
+                          "actual_next_day_direction": actual_direction, "actual_next_day_return_percent": round(next_return * 100, 4), "executed": action})
         if action == "BUY" and cash > 0:
-            notional = cash / (1 + fee_rate)
-            fee = notional * fee_rate
+            notional, fee = cash, 0.0
             grams, cash = notional / float(fill["price"]), 0.0
             trades.append({"action": "BUY", "signal_day": row["observed_on"], "fill_day": fill["observed_on"], "price": fill["price"], "notional": notional, "fee": fee})
             held_days, cooldown = 0, 0
@@ -166,13 +178,19 @@ def replay(rows: list[dict], *, trade_start: date, fee_rate: float = FEE_RATE,
             cooldown -= 1
     final_value = cash + grams * float(rows[-1]["price"])
     benchmark_signal_index = next(index for index, row in enumerate(rows[:-1]) if index >= WARMUP_DAYS and date.fromisoformat(row["observed_on"]) >= trade_start)
-    buy_hold_grams = initial_cash / (1 + fee_rate) / float(rows[benchmark_signal_index + 1]["price"])
+    buy_hold_grams = initial_cash / float(rows[benchmark_signal_index + 1]["price"])
     buy_hold_value = buy_hold_grams * float(rows[-1]["price"]) * (1 - fee_rate)
-    return {"contract": {"signal": "daily close", "execution": "next observed daily quote", "fee_rate_each_side": fee_rate,
+    directional = [item for item in decisions if item["next_day_direction"] in {"UP", "DOWN"}]
+    correct = [item for item in directional if item["next_day_direction"] == item["actual_next_day_direction"]]
+    up_calls = [item for item in directional if item["next_day_direction"] == "UP"]
+    up_correct = [item for item in up_calls if item["actual_next_day_direction"] == "UP"]
+    return {"contract": {"signal": "daily close", "execution": "next observed daily quote", "buy_fee_rate": 0.0, "sell_fee_rate": fee_rate,
                            "availability": "exploratory assumed daily-close availability; not verified vendor release time"},
+            "frozen_rule": {"entry": "price>SMA5>SMA12, 5-day momentum >=1.2%, 10-day drawdown >=-0.7%", "exit": "trend failure or 10-day drawdown <=-1.6%", "anti_churn": "minimum 3 holding days; 2-day post-sale cooldown", "selection": "set before the target month; no target-month parameter fitting"},
             "initial_cash": initial_cash, "final_value": round(final_value, 2), "return_percent": round((final_value / initial_cash - 1) * 100, 3),
             "buy_and_hold_final_value": round(buy_hold_value, 2), "buy_and_hold_return_percent": round((buy_hold_value / initial_cash - 1) * 100, 3),
-            "fees_paid": round(sum(trade["fee"] for trade in trades), 2), "trade_count": len(trades), "trades": trades, "decisions": decisions,
+            "fees_paid": round(sum(trade["fee"] for trade in trades), 2), "trade_count": len(trades),
+            "prediction_metrics": {"all_days": len(decisions), "directional_calls": len(directional), "directional_accuracy_percent": round(100 * len(correct) / len(directional), 2) if directional else None, "up_call_precision_percent": round(100 * len(up_correct) / len(up_calls), 2) if up_calls else None}, "trades": trades, "decisions": decisions,
             "limitations": ["The historical JD chart was retrieved after the fact; replay assumes each quoted daily point was usable after its own close.", "This is one historical month, not evidence that a rule is profitable out of sample.", "DeepSeek output is constrained by deterministic risk gates and is not a trading instruction."]}
 
 

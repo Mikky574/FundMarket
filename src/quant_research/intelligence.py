@@ -368,10 +368,10 @@ def analyse_blind_gold(observations: list[dict], position: str, rule_candidate: 
     if not key:
         raise RuntimeError("DeepSeek API key is not configured")
     evidence = {"experiment": "daily historical blind replay", "calendar_dates": "intentionally omitted",
-                "execution": "decision fills at next observed daily quote; 0.4% fee per side",
+                "execution": "decision fills at next observed daily quote; buy fee 0%, sell fee 0.4%",
                 "position": position, "rule_candidate": rule_candidate, "recent_observations": observations}
     prompt = ("You are a constrained research classifier, not an investment adviser. Do not infer dates or request future data. "
-              "Return only {\"action\":\"BUY|SELL|HOLD\",\"confidence\":0..1,\"reason\":\"under 160 chars\"}. "
+              "Return only {\"next_day_direction\":\"UP|DOWN|FLAT\",\"direction_confidence\":0..1,\"action\":\"BUY|SELL|HOLD\",\"confidence\":0..1,\"reason\":\"under 160 chars\"}. "
               "BUY means move from cash to gold; SELL means move from gold to cash. Use only this sequential evidence:\n" +
               json.dumps(evidence, ensure_ascii=False, separators=(",", ":")))
     response = httpx.post("https://api.deepseek.com/chat/completions", headers={"Authorization": f"Bearer {key}"},
@@ -388,7 +388,14 @@ def analyse_blind_gold(observations: list[dict], position: str, rule_candidate: 
         confidence = min(1.0, max(0.0, float(data.get("confidence", 0))))
     except (TypeError, ValueError):
         confidence = 0.0
-    return {"action": action, "confidence": confidence, "reason": str(data.get("reason", "no reason"))[:160],
+    direction = str(data.get("next_day_direction", "FLAT")).upper()
+    if direction not in {"UP", "DOWN", "FLAT"}:
+        direction = "FLAT"
+    try:
+        direction_confidence = min(1.0, max(0.0, float(data.get("direction_confidence", 0))))
+    except (TypeError, ValueError):
+        direction_confidence = 0.0
+    return {"action": action, "confidence": confidence, "next_day_direction": direction, "direction_confidence": direction_confidence, "reason": str(data.get("reason", "no reason"))[:160],
             "model": "deepseek-v4-flash", "research_only": True}
 
 
