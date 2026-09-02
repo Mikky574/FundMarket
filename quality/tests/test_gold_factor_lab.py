@@ -3,7 +3,7 @@ from datetime import date, datetime, timezone
 from demos.gold_factor_lab.analysis import describe
 from demos.gold_factor_lab import collector
 from demos.gold_factor_lab.history_chart import build_html
-from demos.gold_factor_lab.blind_replay import Decision, anonymised_prompt, replay, third_prior_month
+from demos.gold_factor_lab.blind_replay import Decision, anonymised_prompt, local_tool_decision, replay, third_prior_month
 
 
 def test_jd_collector_marks_history_as_known_only_at_retrieval(monkeypatch):
@@ -106,3 +106,24 @@ def test_blind_replay_hides_dates_and_fills_next_daily_quote():
 
 def test_third_prior_month_is_a_complete_month():
     assert third_prior_month(date(2026, 9, 3)) == (date(2026, 6, 1), date(2026, 6, 30))
+
+
+def test_blind_replay_uses_local_tool_without_sending_calendar_dates(monkeypatch):
+    sent = {}
+
+    class Response:
+        def raise_for_status(self): pass
+        def json(self): return {"action": "BUY", "confidence": 0.8, "reason": "trend"}
+
+    def post(url, **kwargs):
+        sent["url"], sent["json"] = url, kwargs["json"]
+        return Response()
+
+    monkeypatch.setattr("demos.gold_factor_lab.blind_replay.httpx.post", post)
+    result = local_tool_decision(
+        [{"observed_on": "2026-01-01", "price": 100, "return_1d": 0}], in_position=False,
+        rule=Decision("BUY", 0.7, "trend", "rule"), tool_url="http://local/tool",
+    )
+    assert result.action == "BUY"
+    assert sent["url"] == "http://local/tool"
+    assert "2026-" not in str(sent["json"])

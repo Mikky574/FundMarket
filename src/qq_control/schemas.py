@@ -75,3 +75,9 @@ class EvaluationPredictionRequest(BaseModel):
     horizon_trading_days: int = Field(gt=0)
     expected_return_range_percent: list[float] | None = None
     rationale: str = ""
+
+
+class BlindGoldDecisionRequest(BaseModel):
+    position: str
+    rule_candidate: str
+    observations: list[dict] = Field(min_length=1, max_length=20)

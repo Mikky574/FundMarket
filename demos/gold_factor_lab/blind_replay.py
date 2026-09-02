@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 from calendar import monthrange
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -98,26 +97,18 @@ def anonymised_prompt(history: list[dict], *, in_position: bool, rule: Decision)
     )
 
 
-def deepseek_decision(history: list[dict], *, in_position: bool, rule: Decision, api_key: str,
-                      model: str = "deepseek-v4-flash") -> Decision:
-    """Call DeepSeek without reading or persisting any credential."""
-    response = httpx.post(
-        "https://api.deepseek.com/chat/completions",
-        headers={"Authorization": f"Bearer {api_key}"},
-        json={"model": model, "thinking": {"type": "disabled"}, "temperature": 0,
-              "response_format": {"type": "json_object"}, "max_tokens": 180,
-              "messages": [{"role": "system", "content": "Return valid JSON only."},
-                           {"role": "user", "content": anonymised_prompt(history, in_position=in_position, rule=rule)}]},
-        timeout=45,
-    )
+def local_tool_decision(history: list[dict], *, in_position: bool, rule: Decision, tool_url: str) -> Decision:
+    """Use the project's local DeepSeek capability; no credential enters this script."""
+    payload = json.loads(anonymised_prompt(history, in_position=in_position, rule=rule).split("\n", 1)[1])
+    response = httpx.post(tool_url, json={"position": payload["position"], "rule_candidate": rule.action,
+                                           "observations": payload["recent_observations"]}, timeout=60)
     response.raise_for_status()
-    content = response.json()["choices"][0]["message"].get("content") or "{}"
-    data = json.loads(content)
+    data = response.json()
     action = str(data.get("action", "HOLD")).upper()
     if action not in {"BUY", "SELL", "HOLD"}:
         action = "HOLD"
     confidence = min(1.0, max(0.0, float(data.get("confidence", 0))))
-    return Decision(action, confidence, str(data.get("reason", "no reason"))[:160], "deepseek")
+    return Decision(action, confidence, str(data.get("reason", "no reason"))[:160], "deepseek_tool")
 
 
 def _daily_rows(panel: dict[str, list[dict]]) -> list[dict]:
@@ -188,7 +179,8 @@ def replay(rows: list[dict], *, trade_start: date, fee_rate: float = FEE_RATE,
 def main() -> None:
     parser = argparse.ArgumentParser(description="Blind, daily gold replay; writes an isolated research artifact.")
     parser.add_argument("--month", type=date.fromisoformat, help="Any date in the target month; default is three months prior.")
-    parser.add_argument("--deepseek", action="store_true", help="Use DEEPSEEK_API_KEY from the invoking process only.")
+    parser.add_argument("--deepseek", action="store_true", help="Use the local project's DeepSeek research capability.")
+    parser.add_argument("--tool-url", default="http://127.0.0.1:8000/api/v1/internal/research/gold-blind-decision")
     parser.add_argument("--output", type=Path, required=True, help="Ignored research-output path, e.g. data/gold_lab/evaluations/june.json")
     args = parser.parse_args()
     start, end = (date(args.month.year, args.month.month, 1), date(args.month.year, args.month.month, monthrange(args.month.year, args.month.month)[1])) if args.month else third_prior_month(date.today())
@@ -196,10 +188,7 @@ def main() -> None:
     rows = _daily_rows(panel)
     provider = None
     if args.deepseek:
-        key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
-        if not key:
-            raise RuntimeError("DEEPSEEK_API_KEY must be supplied by the invoking process")
-        provider = lambda history, position, rule: deepseek_decision(history, in_position=position, rule=rule, api_key=key)
+        provider = lambda history, position, rule: local_tool_decision(history, in_position=position, rule=rule, tool_url=args.tool_url)
     result = replay(rows, trade_start=start, decision_provider=provider)
     result["target_period"] = {"start": start.isoformat(), "end": end.isoformat()}
     result["strategy"] = "deepseek_guarded" if args.deepseek else "deterministic_rule_baseline"

@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from src.qq_control import draft_research as public_ai_research
-from src.quant_research.intelligence import collect_news
+from src.quant_research.intelligence import analyse_blind_gold, collect_news
 from src.quant_research.intelligence import opportunity_candidates
 from src.quant_research.intelligence import refresh_public_market_display
 from src.quant_research import gold_prices
@@ -99,3 +99,18 @@ def test_fund_research_marks_hot_fund_without_calling_it_a_buy_signal():
     result = fund_research_card({"code": "018099", "name": "保险基金", "history": history}, [])
     assert result["state"] == "OVERHEATED"
     assert result["risk_flags"]
+
+
+def test_blind_gold_capability_rejects_dates_and_sends_only_anonymised_rows(monkeypatch):
+    class Response:
+        def raise_for_status(self): pass
+        def json(self): return {"choices": [{"message": {"content": '{"action":"BUY","confidence":0.8,"reason":"trend"}'}}]}
+
+    sent = {}
+    monkeypatch.setattr("src.quant_research.intelligence._read_key", lambda: "test-key")
+    monkeypatch.setattr("src.quant_research.intelligence.httpx.post", lambda *_args, **kwargs: sent.update(kwargs) or Response())
+    result = analyse_blind_gold([{"day": 1, "gold_cny_per_gram": 900}], "cash", "BUY")
+    assert result["action"] == "BUY"
+    assert "2026-" not in str(sent["json"])
+    with pytest.raises(ValueError, match="unsupported"):
+        analyse_blind_gold([{"day": 1, "observed_on": "2026-01-01"}], "cash", "BUY")

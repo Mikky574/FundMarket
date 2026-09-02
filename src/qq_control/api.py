@@ -10,6 +10,7 @@ from src.historical_evaluation import service as evaluation_service
 from src.qq_control import ledger_control as public_ai_control
 from src.qq_control.dependencies import require_local_bridge
 from src.qq_control.schemas import (
+    BlindGoldDecisionRequest,
     EvaluationMarketImport,
     EvaluationNewsImport,
     EvaluationPredictionRequest,
@@ -21,7 +22,7 @@ from src.qq_control.schemas import (
     PublicAiOrderRequest,
     PublicAiSettleRequest,
 )
-from src.quant_research.intelligence import refresh_public_market_display
+from src.quant_research.intelligence import analyse_blind_gold, refresh_public_market_display
 from src.qq_control.portfolio_view import get_portfolio_dashboard
 
 router = APIRouter(prefix="/api/v1/internal", include_in_schema=False)
@@ -38,6 +39,18 @@ async def market_refresh(request: Request):
                 "summary": dashboard.get("summary"), "positions": dashboard.get("positions")}
     except Exception as exc:
         raise HTTPException(502, f"market refresh failed: {exc}") from exc
+
+
+@router.post("/research/gold-blind-decision")
+def gold_blind_decision(payload: BlindGoldDecisionRequest, request: Request):
+    """Run a non-persistent, date-free DeepSeek classification for gold replay."""
+    require_local_bridge(request)
+    try:
+        return analyse_blind_gold(**payload.model_dump())
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(502, f"blind gold research failed: {exc}") from exc
 
 
 @router.get("/public-ai/portfolio")

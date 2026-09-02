@@ -30,10 +30,8 @@
 # 先跑不调用模型的规则基线
 .\.venv\Scripts\python.exe demos\gold_factor_lab\blind_replay.py --month 2026-06-01 --output data\gold_lab\evaluations\june_rule.json
 
-# 由启动命令临时提供密钥；脚本不会读取或写入任何密钥文件
-$env:DEEPSEEK_API_KEY = "<your-key>"
+# 通过项目本机的 DeepSeek 研究能力调用；回放脚本不读取密钥
 .\.venv\Scripts\python.exe demos\gold_factor_lab\blind_replay.py --month 2026-06-01 --deepseek --output data\gold_lab\evaluations\june_deepseek.json
-Remove-Item Env:DEEPSEEK_API_KEY
 ```
 
 DeepSeek 只会看到顺序编号的历史行（`day`），不会得到日历日期、之后的价格或未来数据。该回放使用“日线收盘后可知”的探索性假设；京东历史图没有提供可核验的原始发布时间，因此结果只能用于方法筛选，不能视作实盘盈利证明。

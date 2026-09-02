@@ -354,6 +354,44 @@ def analyse(quant: dict, news: list[dict]) -> dict:
     return result
 
 
+def analyse_blind_gold(observations: list[dict], position: str, rule_candidate: str) -> dict:
+    """Classify an anonymised replay window without persisting it or creating orders."""
+    if not 1 <= len(observations) <= 20:
+        raise ValueError("blind gold observations must contain 1..20 rows")
+    if position not in {"cash", "long_gold"} or rule_candidate not in {"BUY", "SELL", "HOLD"}:
+        raise ValueError("invalid blind gold state")
+    allowed = {"day", "gold_cny_per_gram", "gold_return_1d_pct", "usd_cny", "broad_us_dollar",
+               "us_10y_real_yield", "us_10y_nominal_yield", "wti_crude"}
+    if any(not isinstance(item, dict) or set(item) - allowed or "day" not in item for item in observations):
+        raise ValueError("blind gold rows contain unsupported fields")
+    key = _read_key()
+    if not key:
+        raise RuntimeError("DeepSeek API key is not configured")
+    evidence = {"experiment": "daily historical blind replay", "calendar_dates": "intentionally omitted",
+                "execution": "decision fills at next observed daily quote; 0.4% fee per side",
+                "position": position, "rule_candidate": rule_candidate, "recent_observations": observations}
+    prompt = ("You are a constrained research classifier, not an investment adviser. Do not infer dates or request future data. "
+              "Return only {\"action\":\"BUY|SELL|HOLD\",\"confidence\":0..1,\"reason\":\"under 160 chars\"}. "
+              "BUY means move from cash to gold; SELL means move from gold to cash. Use only this sequential evidence:\n" +
+              json.dumps(evidence, ensure_ascii=False, separators=(",", ":")))
+    response = httpx.post("https://api.deepseek.com/chat/completions", headers={"Authorization": f"Bearer {key}"},
+                          json={"model": "deepseek-v4-flash", "thinking": {"type": "disabled"}, "temperature": 0,
+                                "response_format": {"type": "json_object"}, "max_tokens": 180,
+                                "messages": [{"role": "system", "content": "Return valid JSON only."}, {"role": "user", "content": prompt}]},
+                          timeout=settings.market_intelligence_http_timeout_seconds)
+    response.raise_for_status()
+    data = json.loads(response.json()["choices"][0]["message"].get("content") or "{}")
+    action = str(data.get("action", "HOLD")).upper()
+    if action not in {"BUY", "SELL", "HOLD"}:
+        action = "HOLD"
+    try:
+        confidence = min(1.0, max(0.0, float(data.get("confidence", 0))))
+    except (TypeError, ValueError):
+        confidence = 0.0
+    return {"action": action, "confidence": confidence, "reason": str(data.get("reason", "no reason"))[:160],
+            "model": "deepseek-v4-flash", "research_only": True}
+
+
 def refresh_intelligence(quant: dict | None = None) -> dict:
     """Create the hourly LLM interpretation from the most recent quant evidence."""
     quant = quant or latest_quant_snapshot()
