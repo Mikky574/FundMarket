@@ -17,6 +17,7 @@ import httpx
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 JD_PRODUCT_SKU = "1961543816"
+JD_LATEST_URL = "https://api.jdjygold.com/gw2/generic/jrm/h5/m/stdLatestPrice"
 JD_MONTH_URL = "https://ms.jr.jd.com/gw2/generic/hj/h5/m/cfGetQuotesPriceKLine"
 JD_INTRADAY_URL = "https://ms.jr.jd.com/gw2/generic/hj/h5/m/cfGetPriceTrendChart"
 FRED_CSV_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv"
@@ -55,6 +56,30 @@ def _positive_decimal(value: object, field: str) -> float:
     if not number.is_finite() or number <= 0:
         raise CollectionError(f"invalid {field}: {value!r}")
     return float(number)
+
+
+def collect_jd_latest(*, retrieved_at: datetime | None = None) -> dict:
+    """Fetch one exact current product quote without depending on app settings."""
+    received = retrieved_at or _now()
+    response = httpx.get(JD_LATEST_URL, params={"productSku": JD_PRODUCT_SKU}, headers=HEADERS, timeout=20)
+    response.raise_for_status()
+    payload = response.json()
+    item = payload.get("resultData", {}).get("datas", {}) if isinstance(payload, dict) else {}
+    if not payload.get("success") or not isinstance(item, dict):
+        raise CollectionError("JD ZheShang latest quote was unavailable")
+    try:
+        source_at = datetime.fromtimestamp(int(str(item["time"])) / 1000, tz=SHANGHAI).replace(microsecond=0)
+    except (KeyError, TypeError, ValueError, OSError) as exc:
+        raise CollectionError("JD ZheShang latest quote contains an invalid timestamp") from exc
+    return {
+        "source": "jd_zheshang_latest",
+        "source_at": source_at.isoformat(),
+        "retrieved_at": received.isoformat(),
+        "value": _positive_decimal(item.get("price"), "JD latest price"),
+        "unit": "cny_per_gram",
+        "availability_basis": "observed_live_quote",
+        "up_and_down_rate": item.get("upAndDownRate"),
+    }
 
 
 def collect_jd_month(*, retrieved_at: datetime | None = None) -> list[dict]:

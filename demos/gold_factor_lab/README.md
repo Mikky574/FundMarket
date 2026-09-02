@@ -8,6 +8,18 @@
 .\.venv\Scripts\python.exe demos\gold_factor_lab\watch_live.py --samples 1
 ```
 
+持续采集任务（独立 SQLite，未连接网站、QQ 或账本）：
+
+```powershell
+.\.venv\Scripts\python.exe demos\gold_factor_lab\live_task.py --once
+```
+
+历史曲线（生成独立 HTML）：
+
+```powershell
+.\.venv\Scripts\python.exe demos\gold_factor_lab\history_chart.py --start 2026-08-03 --end 2026-09-03
+```
+
 ```powershell
 .\.venv\Scripts\python.exe demos\gold_factor_lab\run_demo.py --start 2026-08-03 --end 2026-09-03
 ```
