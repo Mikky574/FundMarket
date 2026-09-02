@@ -1,0 +1,212 @@
+"""Point-in-time daily replay for the isolated gold-factor experiment.
+
+This is a research backtest, never an order path.  A signal at day *t* uses
+only rows through day *t* and is filled at the next available daily quote.  The
+optional DeepSeek adapter receives sequential day numbers, not calendar dates.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from calendar import monthrange
+from dataclasses import dataclass
+from datetime import date, timedelta
+from pathlib import Path
+from typing import Callable
+
+import httpx
+
+from demos.gold_factor_lab.collector import collect_factor_panel
+
+
+FEE_RATE = 0.004  # 0.4% for every purchase and sale.
+INITIAL_CASH = 100_000.0
+WARMUP_DAYS = 20
+
+
+@dataclass(frozen=True)
+class Decision:
+    action: str
+    confidence: float
+    reason: str
+    source: str
+
+
+def third_prior_month(reference: date) -> tuple[date, date]:
+    """Return the complete calendar month three months before ``reference``."""
+    month_number = reference.year * 12 + reference.month - 1 - 3
+    year, month_index = divmod(month_number, 12)
+    month = month_index + 1
+    return date(year, month, 1), date(year, month, monthrange(year, month)[1])
+
+
+def _sma(values: list[float], period: int) -> float | None:
+    return sum(values[-period:]) / period if len(values) >= period else None
+
+
+def rule_decision(history: list[dict], *, in_position: bool, held_days: int, cooldown_days: int) -> Decision:
+    """A conservative, fee-aware trend rule with hysteresis.
+
+    Entry requires a confirmed short/medium trend.  Exit requires a meaningful
+    trend failure, so a 0.8% round trip fee is not repeatedly paid for noise.
+    """
+    prices = [float(row["price"]) for row in history]
+    if len(prices) < 12:
+        return Decision("HOLD", 0.0, "warm-up data is incomplete", "rule")
+    price, sma5, sma12 = prices[-1], _sma(prices, 5), _sma(prices, 12)
+    momentum5 = price / prices[-6] - 1 if len(prices) >= 6 else 0.0
+    drawdown10 = price / max(prices[-10:]) - 1
+    trend_up = price > sma5 > sma12 and momentum5 >= 0.012 and drawdown10 >= -0.007
+    trend_failed = (price < sma5 and momentum5 <= -0.008) or drawdown10 <= -0.016
+    if not in_position and cooldown_days == 0 and trend_up:
+        return Decision("BUY", 0.65, "price above 5/12-day averages with >1.2% five-day momentum", "rule")
+    if in_position and held_days >= 3 and trend_failed:
+        return Decision("SELL", 0.75, "trend failure exceeds the fee-noise buffer", "rule")
+    return Decision("HOLD", 0.4, "no fee-aware trend transition", "rule")
+
+
+def anonymised_prompt(history: list[dict], *, in_position: bool, rule: Decision) -> str:
+    """Create the exact model input; it intentionally has no calendar date."""
+    rows = []
+    for index, row in enumerate(history[-WARMUP_DAYS:], start=max(1, len(history) - WARMUP_DAYS + 1)):
+        rows.append({
+            "day": index,
+            "gold_cny_per_gram": round(float(row["price"]), 4),
+            "gold_return_1d_pct": round(float(row.get("return_1d", 0)) * 100, 3),
+            "usd_cny": row.get("usd_cny"),
+            "broad_us_dollar": row.get("broad_us_dollar"),
+            "us_10y_real_yield": row.get("us_10y_real_yield"),
+            "us_10y_nominal_yield": row.get("us_10y_nominal_yield"),
+            "wti_crude": row.get("wti_crude"),
+        })
+    payload = {
+        "experiment": "daily historical blind replay",
+        "calendar_dates": "intentionally omitted",
+        "execution": "a decision after this row fills at the next observed daily quote; fee is 0.4% per side",
+        "position": "long_gold" if in_position else "cash",
+        "rule_candidate": rule.action,
+        "recent_observations": rows,
+    }
+    return (
+        "You are a constrained research classifier, not an investment adviser. "
+        "Do not infer dates and do not ask for future data. Return JSON only: "
+        '{"action":"BUY|SELL|HOLD","confidence":0..1,"reason":"under 160 chars"}. '
+        "BUY means move from cash to gold; SELL means move from gold to cash. "
+        "Use only the sequential observations supplied below.\n"
+        + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    )
+
+
+def deepseek_decision(history: list[dict], *, in_position: bool, rule: Decision, api_key: str,
+                      model: str = "deepseek-v4-flash") -> Decision:
+    """Call DeepSeek without reading or persisting any credential."""
+    response = httpx.post(
+        "https://api.deepseek.com/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}"},
+        json={"model": model, "thinking": {"type": "disabled"}, "temperature": 0,
+              "response_format": {"type": "json_object"}, "max_tokens": 180,
+              "messages": [{"role": "system", "content": "Return valid JSON only."},
+                           {"role": "user", "content": anonymised_prompt(history, in_position=in_position, rule=rule)}]},
+        timeout=45,
+    )
+    response.raise_for_status()
+    content = response.json()["choices"][0]["message"].get("content") or "{}"
+    data = json.loads(content)
+    action = str(data.get("action", "HOLD")).upper()
+    if action not in {"BUY", "SELL", "HOLD"}:
+        action = "HOLD"
+    confidence = min(1.0, max(0.0, float(data.get("confidence", 0))))
+    return Decision(action, confidence, str(data.get("reason", "no reason"))[:160], "deepseek")
+
+
+def _daily_rows(panel: dict[str, list[dict]]) -> list[dict]:
+    """Join only information observed no later than each gold quote's day."""
+    factors = {name: {row["observed_on"]: float(row["value"]) for row in rows}
+               for name, rows in panel.items() if name != "jd_zheshang_gold"}
+    latest: dict[str, float | None] = {name: None for name in factors}
+    output = []
+    for gold in sorted(panel["jd_zheshang_gold"], key=lambda row: row["observed_on"]):
+        day = gold["observed_on"]
+        for name, values in factors.items():
+            if day in values:
+                latest[name] = values[day]
+        price = float(gold["value"])
+        output.append({"observed_on": day, "price": price, **latest})
+    for index, row in enumerate(output):
+        row["return_1d"] = 0.0 if index == 0 else row["price"] / output[index - 1]["price"] - 1
+    return output
+
+
+def replay(rows: list[dict], *, trade_start: date, fee_rate: float = FEE_RATE,
+           initial_cash: float = INITIAL_CASH, decision_provider: Callable[[list[dict], bool, Decision], Decision] | None = None) -> dict:
+    """Run an all-cash/all-gold replay; decisions are made at close, filled next day."""
+    if fee_rate < 0 or fee_rate >= 1:
+        raise ValueError("fee_rate must be in [0, 1)")
+    decision_provider = decision_provider or (lambda _history, _position, rule: rule)
+    cash, grams, held_days, cooldown = initial_cash, 0.0, 0, 0
+    trades, decisions = [], []
+    for index in range(WARMUP_DAYS, len(rows) - 1):
+        row, fill = rows[index], rows[index + 1]
+        if date.fromisoformat(row["observed_on"]) < trade_start:
+            continue
+        rule = rule_decision(rows[:index + 1], in_position=grams > 0, held_days=held_days, cooldown_days=cooldown)
+        model = decision_provider(rows[:index + 1], grams > 0, rule)
+        # The model may veto a rule entry or request a sufficiently confident
+        # protective exit. An unsupported model BUY is never allowed.
+        action = "SELL" if rule.action == "SELL" or (grams > 0 and model.action == "SELL" and model.confidence >= 0.65) else ("BUY" if rule.action == "BUY" and model.action == "BUY" and model.confidence >= 0.55 else "HOLD")
+        decisions.append({"signal_day": row["observed_on"], "fill_day": fill["observed_on"], "rule": rule.action,
+                          "model": model.action, "model_confidence": model.confidence, "executed": action})
+        if action == "BUY" and cash > 0:
+            notional = cash / (1 + fee_rate)
+            fee = notional * fee_rate
+            grams, cash = notional / float(fill["price"]), 0.0
+            trades.append({"action": "BUY", "signal_day": row["observed_on"], "fill_day": fill["observed_on"], "price": fill["price"], "notional": notional, "fee": fee})
+            held_days, cooldown = 0, 0
+        elif action == "SELL" and grams > 0:
+            notional = grams * float(fill["price"])
+            fee = notional * fee_rate
+            cash, grams = notional - fee, 0.0
+            trades.append({"action": "SELL", "signal_day": row["observed_on"], "fill_day": fill["observed_on"], "price": fill["price"], "notional": notional, "fee": fee})
+            held_days, cooldown = 0, 2
+        elif grams > 0:
+            held_days += 1
+        elif cooldown:
+            cooldown -= 1
+    final_value = cash + grams * float(rows[-1]["price"])
+    benchmark_signal_index = next(index for index, row in enumerate(rows[:-1]) if index >= WARMUP_DAYS and date.fromisoformat(row["observed_on"]) >= trade_start)
+    buy_hold_grams = initial_cash / (1 + fee_rate) / float(rows[benchmark_signal_index + 1]["price"])
+    buy_hold_value = buy_hold_grams * float(rows[-1]["price"]) * (1 - fee_rate)
+    return {"contract": {"signal": "daily close", "execution": "next observed daily quote", "fee_rate_each_side": fee_rate,
+                           "availability": "exploratory assumed daily-close availability; not verified vendor release time"},
+            "initial_cash": initial_cash, "final_value": round(final_value, 2), "return_percent": round((final_value / initial_cash - 1) * 100, 3),
+            "buy_and_hold_final_value": round(buy_hold_value, 2), "buy_and_hold_return_percent": round((buy_hold_value / initial_cash - 1) * 100, 3),
+            "fees_paid": round(sum(trade["fee"] for trade in trades), 2), "trade_count": len(trades), "trades": trades, "decisions": decisions,
+            "limitations": ["The historical JD chart was retrieved after the fact; replay assumes each quoted daily point was usable after its own close.", "This is one historical month, not evidence that a rule is profitable out of sample.", "DeepSeek output is constrained by deterministic risk gates and is not a trading instruction."]}
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Blind, daily gold replay; writes an isolated research artifact.")
+    parser.add_argument("--month", type=date.fromisoformat, help="Any date in the target month; default is three months prior.")
+    parser.add_argument("--deepseek", action="store_true", help="Use DEEPSEEK_API_KEY from the invoking process only.")
+    parser.add_argument("--output", type=Path, required=True, help="Ignored research-output path, e.g. data/gold_lab/evaluations/june.json")
+    args = parser.parse_args()
+    start, end = (date(args.month.year, args.month.month, 1), date(args.month.year, args.month.month, monthrange(args.month.year, args.month.month)[1])) if args.month else third_prior_month(date.today())
+    panel = collect_factor_panel(start=start - timedelta(days=80), end=end)
+    rows = _daily_rows(panel)
+    provider = None
+    if args.deepseek:
+        key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+        if not key:
+            raise RuntimeError("DEEPSEEK_API_KEY must be supplied by the invoking process")
+        provider = lambda history, position, rule: deepseek_decision(history, in_position=position, rule=rule, api_key=key)
+    result = replay(rows, trade_start=start, decision_provider=provider)
+    result["target_period"] = {"start": start.isoformat(), "end": end.isoformat()}
+    result["strategy"] = "deepseek_guarded" if args.deepseek else "deterministic_rule_baseline"
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(args.output.resolve())
+
+
+if __name__ == "__main__":
+    main()

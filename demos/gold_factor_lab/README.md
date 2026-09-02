@@ -24,4 +24,18 @@
 .\.venv\Scripts\python.exe demos\gold_factor_lab\run_demo.py --start 2026-08-03 --end 2026-09-03
 ```
 
+盲测回放（默认取当前日期前三个月的完整月份；信号在每日收盘后生成、以下一个日线报价成交；单边手续费为 0.4%）：
+
+```powershell
+# 先跑不调用模型的规则基线
+.\.venv\Scripts\python.exe demos\gold_factor_lab\blind_replay.py --month 2026-06-01 --output data\gold_lab\evaluations\june_rule.json
+
+# 由启动命令临时提供密钥；脚本不会读取或写入任何密钥文件
+$env:DEEPSEEK_API_KEY = "<your-key>"
+.\.venv\Scripts\python.exe demos\gold_factor_lab\blind_replay.py --month 2026-06-01 --deepseek --output data\gold_lab\evaluations\june_deepseek.json
+Remove-Item Env:DEEPSEEK_API_KEY
+```
+
+DeepSeek 只会看到顺序编号的历史行（`day`），不会得到日历日期、之后的价格或未来数据。该回放使用“日线收盘后可知”的探索性假设；京东历史图没有提供可核验的原始发布时间，因此结果只能用于方法筛选，不能视作实盘盈利证明。
+
 原始历史点默认只在本次采集时间可用，防止回测把后来取得的图表数据当作当时已知信息。任何“次日可用”的假设须在后续评估阶段单独版本化、验证，不能直接变成实盘规则。

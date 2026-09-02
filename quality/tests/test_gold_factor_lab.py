@@ -1,8 +1,9 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from demos.gold_factor_lab.analysis import describe
 from demos.gold_factor_lab import collector
 from demos.gold_factor_lab.history_chart import build_html
+from demos.gold_factor_lab.blind_replay import Decision, anonymised_prompt, replay, third_prior_month
 
 
 def test_jd_collector_marks_history_as_known_only_at_retrieval(monkeypatch):
@@ -87,3 +88,21 @@ def test_history_chart_separates_units_and_states_attribution_limit():
     rendered = build_html(panel)
     assert "同尺度比较" in rendered
     assert "不能严谨地把本段涨跌归因" in rendered
+
+
+def test_blind_replay_hides_dates_and_fills_next_daily_quote():
+    rows = [
+        {"observed_on": f"2026-01-{day:02d}", "price": 100 + day, "return_1d": 0}
+        for day in range(1, 29)
+    ]
+    prompt = anonymised_prompt(rows[:20], in_position=False, rule=Decision("BUY", 0.7, "trend", "rule"))
+    assert "2026-" not in prompt
+    calls = iter((Decision("BUY", 0.9, "confirm", "test"), Decision("SELL", 0.9, "protect", "test")))
+    result = replay(rows, trade_start=date(2026, 1, 1), decision_provider=lambda *_args: next(calls, Decision("HOLD", 0, "", "test")))
+    assert result["trades"][0]["signal_day"] == "2026-01-21"
+    assert result["trades"][0]["fill_day"] == "2026-01-22"
+    assert result["fees_paid"] > 0
+
+
+def test_third_prior_month_is_a_complete_month():
+    assert third_prior_month(date(2026, 9, 3)) == (date(2026, 6, 1), date(2026, 6, 30))
