@@ -8,12 +8,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.paper_engine import PaperLedger, fetch_trading_dates, order_schedule_after_cutoff
+from src.paths import PUBLIC_LEDGER_REPORTS_ROOT, PUBLIC_LEDGER_STATE_PATH
+from src.qq_control.paper_ledger import PaperLedger, fetch_trading_dates, order_schedule_after_cutoff
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--state", type=Path, default=Path("paper/state.json"))
+    parser.add_argument("--state", type=Path, default=PUBLIC_LEDGER_STATE_PATH)
     sub = parser.add_subparsers(dest="command", required=True)
     init = sub.add_parser("init"); init.add_argument("--start", required=True); init.add_argument("--end", required=True)
     buy = sub.add_parser("buy"); buy.add_argument("--id", required=True); buy.add_argument("--date", required=True)
@@ -45,7 +46,7 @@ def main():
     correct.add_argument("--reason", required=True); correct.add_argument("--evidence", action="append", default=[])
     sub.add_parser("verify")
     daily = sub.add_parser("daily"); daily.add_argument("--date", required=True)
-    daily.add_argument("--report-dir", type=Path, default=Path("paper/reports"))
+    daily.add_argument("--report-dir", type=Path, default=PUBLIC_LEDGER_REPORTS_ROOT)
     sub.add_parser("status")
     args = parser.parse_args(); ledger = PaperLedger(args.state)
     if args.command == "init": ledger.initialize(args.start, args.end, Decimal("100000"))

@@ -3,16 +3,17 @@ import argparse
 import json
 from pathlib import Path
 
-from app.benchmark_engine import BenchmarkTracker
-from app.paper_engine import PaperLedger
+from src.historical_evaluation.benchmark import BenchmarkTracker
+from src.paths import PUBLIC_LEDGER_BENCHMARK_PATH, PUBLIC_LEDGER_REPORTS_ROOT, PUBLIC_LEDGER_STATE_PATH
+from src.qq_control.paper_ledger import PaperLedger
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--date", required=True)
-    parser.add_argument("--portfolio", type=Path, default=Path("paper/state.json"))
-    parser.add_argument("--benchmarks", type=Path, default=Path("paper/benchmarks.json"))
-    parser.add_argument("--reports", type=Path, default=Path("paper/reports"))
+    parser.add_argument("--portfolio", type=Path, default=PUBLIC_LEDGER_STATE_PATH)
+    parser.add_argument("--benchmarks", type=Path, default=PUBLIC_LEDGER_BENCHMARK_PATH)
+    parser.add_argument("--reports", type=Path, default=PUBLIC_LEDGER_REPORTS_ROOT)
     args = parser.parse_args()
     ledger = PaperLedger(args.portfolio)
     result = ledger.daily_close(args.date)

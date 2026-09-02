@@ -11,9 +11,9 @@ import json
 import subprocess
 import tempfile
 from datetime import datetime
-from pathlib import Path
 
 from src.config import settings
+from src.paths import PUBLIC_LEDGER_STATE_PATH
 from src.quant_research.intelligence import latest
 
 ALLOWED_ACTIONS = {"WATCH", "BUY", "ADD", "REDUCE", "SELL", "REBALANCE"}
@@ -37,7 +37,7 @@ def public_evidence_packet() -> dict:
     age_minutes = (datetime.now().astimezone() - generated_at.astimezone()).total_seconds() / 60
     if age_minutes > settings.market_intelligence_max_age_minutes:
         raise RuntimeError(f"市场情报已过期（{age_minutes:.0f} 分钟），请先刷新研究证据")
-    state_path = Path("paper/state.json")
+    state_path = PUBLIC_LEDGER_STATE_PATH
     if not state_path.exists():
         raise RuntimeError("公共 AI 账本不存在")
     state = json.loads(state_path.read_text(encoding="utf-8"))

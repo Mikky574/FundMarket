@@ -25,6 +25,7 @@ from src.qq_control import ledger_control as public_ai_control
 from src.historical_evaluation import service as evaluation_service
 from src.qq_control.api import router as internal_router
 from src.web_user.api import router as users_router
+from src.paths import STATIC_ROOT
 from pydantic import BaseModel, Field
 
 app = FastAPI(
@@ -33,7 +34,7 @@ app = FastAPI(
     description="中国 A 股统一行情接口。数据仅供研究，不构成投资建议。",
 )
 service = StockService(AkShareProvider())
-STATIC_DIR = Path(__file__).resolve().parent / "web_user" / "static"
+STATIC_DIR = STATIC_ROOT
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 app.include_router(internal_router)
 app.include_router(users_router)

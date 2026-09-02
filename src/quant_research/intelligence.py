@@ -21,6 +21,7 @@ from src.quant_research.fund_data import get_fund_overview
 from src.quant_research.fund_signals import fund_research_card
 from src.quant_research.providers.akshare_provider import AkShareProvider
 from src.quant_research.stock_service import StockService
+from src.paths import PUBLIC_FUND_POOL_PATH, PUBLIC_LEDGER_DATA_ROOT, PUBLIC_LEDGER_STATE_PATH
 
 
 def _now() -> str:
@@ -98,7 +99,7 @@ def _watch_funds(funds: list[tuple[str, str]], industry_rows: list[dict] | None 
             fund_live["research_card"] = fund_research_card(overview, industry_rows or [])
         except Exception as exc:
             fund_live = {"source": "public_fund_nav", "error": str(exc)[:160]}
-        snapshots = sorted(Path("paper/data").glob(f"*fund_{code}*.json"), key=lambda item: item.stat().st_mtime)
+        snapshots = sorted(PUBLIC_LEDGER_DATA_ROOT.glob(f"*fund_{code}*.json"), key=lambda item: item.stat().st_mtime)
         disclosure = {}
         # Prefer the newest report that actually contains disclosed components;
         # a later official-NAV snapshot is not a holdings report.
@@ -128,7 +129,7 @@ def _watch_funds(funds: list[tuple[str, str]], industry_rows: list[dict] | None 
 
 
 def collect_portfolio_watchlist(industry_rows: list[dict] | None = None) -> list[dict]:
-    state_path = Path("paper/state.json")
+    state_path = PUBLIC_LEDGER_STATE_PATH
     if not state_path.exists():
         return []
     state = json.loads(state_path.read_text(encoding="utf-8"))
@@ -139,7 +140,7 @@ def collect_portfolio_watchlist(industry_rows: list[dict] | None = None) -> list
 
 def collect_public_research_watchlist(industry_rows: list[dict] | None = None) -> list[dict]:
     """Public AI candidate/observation pool, including unheld technology funds."""
-    path = Path("paper/fund_pool.json")
+    path = PUBLIC_FUND_POOL_PATH
     if not path.exists():
         return []
     pool = json.loads(path.read_text(encoding="utf-8"))

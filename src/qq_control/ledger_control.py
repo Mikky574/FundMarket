@@ -8,15 +8,13 @@ from __future__ import annotations
 import uuid
 from datetime import date
 from decimal import Decimal
-from pathlib import Path
-
 from src.qq_control.paper_ledger import PaperLedger, fetch_trading_dates, order_schedule_after_cutoff
 from src.qq_control.portfolio_view import get_portfolio_dashboard
+from src.paths import PUBLIC_LEDGER_FEE_ROOT, PUBLIC_LEDGER_STATE_PATH
 
 
-ROOT = Path(__file__).resolve().parents[1]
-STATE_PATH = ROOT / "paper" / "state.json"
-FEE_ROOT = ROOT / "paper" / "fees"
+STATE_PATH = PUBLIC_LEDGER_STATE_PATH
+FEE_ROOT = PUBLIC_LEDGER_FEE_ROOT
 
 
 def _ledger() -> PaperLedger:

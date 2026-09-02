@@ -13,7 +13,7 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from app.evaluation_service import import_news
+from src.historical_evaluation.service import import_news
 
 
 def _text(item, name: str) -> str:

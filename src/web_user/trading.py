@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 
 from src.config import settings
 from src.quant_research.fund_data import get_fund_overview
+from src.paths import PUBLIC_LEDGER_FEE_ROOT
 
 
 DB_PATH = Path(settings.database_root).resolve() / "user_trading.sqlite3"
@@ -237,7 +238,7 @@ def _schedule(now: datetime, trading_dates: list[date] | None = None) -> tuple[s
 
 
 def _fees(code: str) -> dict:
-    path = Path(__file__).resolve().parents[1] / "paper" / "fees" / f"{code}.json"
+    path = PUBLIC_LEDGER_FEE_ROOT / f"{code}.json"
     if path.exists():
         return json.loads(path.read_text(encoding="utf-8"))
     return {"subscription_fee_rate": 0, "redemption": [

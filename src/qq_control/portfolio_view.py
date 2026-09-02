@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import json
 from decimal import Decimal
-from pathlib import Path
+from src.paths import (
+    PROJECT_ROOT,
+    PUBLIC_LEDGER_BENCHMARK_PATH,
+    PUBLIC_LEDGER_STATE_PATH,
+)
 
 
-ROOT = Path(__file__).resolve().parents[1]
-STATE_PATH = ROOT / "paper" / "state.json"
-BENCHMARK_PATH = ROOT / "paper" / "benchmarks.json"
-WATCHLIST_PATH = ROOT / "market_intelligence" / "watchlist.json"
+STATE_PATH = PUBLIC_LEDGER_STATE_PATH
+BENCHMARK_PATH = PUBLIC_LEDGER_BENCHMARK_PATH
+WATCHLIST_PATH = PROJECT_ROOT / "market_intelligence" / "watchlist.json"
 
 
 def _decimal(value: object) -> Decimal:

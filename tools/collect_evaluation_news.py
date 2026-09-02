@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from app.evaluation_service import import_news
+from src.historical_evaluation.service import import_news
 
 
 def main() -> None:

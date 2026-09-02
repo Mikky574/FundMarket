@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 import akshare as ak
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from app.evaluation_service import import_market
+from src.historical_evaluation.service import import_market
 
 
 def main() -> None:

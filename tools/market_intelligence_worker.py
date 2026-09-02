@@ -20,7 +20,7 @@ os.environ.setdefault("no_proxy", "*")
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
 
-from app.market_intelligence import refresh_intelligence, refresh_quant_snapshot
+from src.quant_research.intelligence import refresh_intelligence, refresh_quant_snapshot
 
 
 def main() -> None:

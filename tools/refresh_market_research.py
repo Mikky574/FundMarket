@@ -12,7 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.market_intelligence import refresh_intelligence, refresh_quant_snapshot
+from src.quant_research.intelligence import refresh_intelligence, refresh_quant_snapshot
 
 
 def main() -> None:
