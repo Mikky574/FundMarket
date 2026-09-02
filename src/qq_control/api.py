@@ -17,6 +17,7 @@ from src.qq_control.schemas import (
     PublicAiAnnotationRequest,
     PublicAiCancelOrderRequest,
     PublicAiDecisionRequest,
+    PublicAiExperimentResetRequest,
     PublicAiOrderRequest,
     PublicAiSettleRequest,
 )
@@ -55,6 +56,15 @@ def public_ai_decisions(request: Request):
 def public_ai_orders(request: Request):
     require_local_bridge(request)
     return {"items": public_ai_control.orders()}
+
+
+@router.post("/public-ai/experiments/archive-and-initialize")
+def archive_and_initialize_experiment(payload: PublicAiExperimentResetRequest, request: Request):
+    require_local_bridge(request)
+    try:
+        return public_ai_control.archive_and_initialize_experiment(payload.model_dump())
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 @router.post("/public-ai/decisions")

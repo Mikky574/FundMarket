@@ -9,6 +9,7 @@ DATA_ROOT = PROJECT_ROOT / "data"
 # Public-paper experiments are stored separately from source code.  Code must
 # use these paths rather than constructing the retired ``paper/`` location.
 PUBLIC_LEDGER_ROOT = DATA_ROOT / "public_ledger"
+PUBLIC_LEDGER_ARCHIVE_ROOT = DATA_ROOT / "public_ledger_archive"
 PUBLIC_LEDGER_STATE_PATH = PUBLIC_LEDGER_ROOT / "state.json"
 PUBLIC_LEDGER_BENCHMARK_PATH = PUBLIC_LEDGER_ROOT / "benchmarks.json"
 PUBLIC_LEDGER_FEE_ROOT = PUBLIC_LEDGER_ROOT / "fees"

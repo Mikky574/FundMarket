@@ -57,7 +57,7 @@ class PaperLedger:
         with audit_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-    def initialize(self, start: str, end: str, initial_cash: Decimal):
+    def initialize(self, start: str, end: str, initial_cash: Decimal, experiment: dict | None = None):
         if self.state is not None:
             raise ValueError("实验账本已经存在")
         self.state = {
@@ -68,7 +68,10 @@ class PaperLedger:
             "rules": {"execution": "orders after 15:00 use the next trading day's NAV; confirmation is normally T+1",
                       "lookahead": "orders cannot be edited or cancelled after registration"},
         }
-        self.save("LEDGER_INITIALIZED", {"start": start, "end": end, "initial_cash": str(qmoney(initial_cash))})
+        if experiment:
+            self.state["experiment"] = experiment
+        self.save("LEDGER_INITIALIZED", {"start": start, "end": end, "initial_cash": str(qmoney(initial_cash)),
+                                           "experiment": experiment or {}})
 
     def record_decision(self, decision_id: str, decision_date: str, action: str,
                         market_observation: str, reason: str, confidence: int,

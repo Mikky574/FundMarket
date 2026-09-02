@@ -6,15 +6,19 @@ filesystem or CLI access to the public portfolio ledger.
 from __future__ import annotations
 
 import uuid
-from datetime import date
+import json
+import shutil
+from datetime import date, datetime
 from decimal import Decimal
+from pathlib import Path
 from src.qq_control.paper_ledger import PaperLedger, fetch_trading_dates, order_schedule_after_cutoff
 from src.qq_control.portfolio_view import get_portfolio_dashboard
-from src.paths import PUBLIC_LEDGER_FEE_ROOT, PUBLIC_LEDGER_STATE_PATH
+from src.paths import PUBLIC_LEDGER_ARCHIVE_ROOT, PUBLIC_LEDGER_FEE_ROOT, PUBLIC_LEDGER_STATE_PATH
 
 
 STATE_PATH = PUBLIC_LEDGER_STATE_PATH
 FEE_ROOT = PUBLIC_LEDGER_FEE_ROOT
+ARCHIVE_ROOT = PUBLIC_LEDGER_ARCHIVE_ROOT
 
 
 def _ledger() -> PaperLedger:
@@ -34,6 +38,63 @@ def _schedule(decision_date: str) -> tuple[str, str]:
 
 def portfolio() -> dict:
     return get_portfolio_dashboard()
+
+
+def archive_and_initialize_experiment(payload: dict) -> dict:
+    """Archive the active experiment, then create a separately audited ledger.
+
+    This is only called through the local privileged API after explicit owner
+    confirmation. No historical ledger is deleted.
+    """
+    confirmation = str(payload.get("user_confirmation") or "").strip()
+    if not confirmation:
+        raise ValueError("user_confirmation is required")
+    name = str(payload.get("experiment_name") or "").strip()
+    if not name:
+        raise ValueError("experiment_name is required")
+    try:
+        start = date.fromisoformat(str(payload["start_date"])).isoformat()
+        end = date.fromisoformat(str(payload["end_date"])).isoformat()
+        initial_cash = Decimal(str(payload.get("initial_cash") or "0"))
+    except (KeyError, ValueError, ArithmeticError) as exc:
+        raise ValueError("start_date, end_date, and initial_cash must be valid") from exc
+    if end < start:
+        raise ValueError("end_date must not be before start_date")
+    if initial_cash <= 0:
+        raise ValueError("initial_cash must be positive")
+
+    active_root = STATE_PATH.parent
+    archive_id = f"EXP-{datetime.now().astimezone():%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:6]}"
+    archived_root: Path | None = None
+    if active_root.exists():
+        archived_root = ARCHIVE_ROOT / archive_id
+        ARCHIVE_ROOT.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(active_root), str(archived_root))
+        manifest = {
+            "archive_id": archive_id,
+            "archived_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "reason": "owner requested a new public-paper experiment",
+            "user_confirmation": confirmation,
+        }
+        (archived_root / "archive_manifest.json").write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+    experiment = {
+        "experiment_id": f"EXP-{uuid.uuid4().hex[:12]}",
+        "name": name,
+        "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "created_by_confirmation": confirmation,
+    }
+    try:
+        ledger = PaperLedger(STATE_PATH)
+        ledger.initialize(start, end, initial_cash, experiment=experiment)
+    except Exception:
+        if archived_root and archived_root.exists() and not active_root.exists():
+            shutil.move(str(archived_root), str(active_root))
+        raise
+    return {"experiment": experiment, "start_date": start, "end_date": end,
+            "initial_cash": str(initial_cash), "archived_experiment_id": archive_id if archived_root else None}
 
 
 def decisions() -> list[dict]:

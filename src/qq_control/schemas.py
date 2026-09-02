@@ -46,6 +46,14 @@ class PublicAiCancelOrderRequest(BaseModel):
     user_confirmation: str
 
 
+class PublicAiExperimentResetRequest(BaseModel):
+    experiment_name: str = Field(min_length=1, max_length=120)
+    start_date: str
+    end_date: str
+    initial_cash: str = "100000"
+    user_confirmation: str = Field(min_length=1, max_length=1000)
+
+
 class EvaluationMarketImport(BaseModel):
     rows: list[dict]
 
