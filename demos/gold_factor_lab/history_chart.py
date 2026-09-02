@@ -45,6 +45,8 @@ def build_html(panel: dict[str, list[dict]]) -> str:
             f'<text x="1060" y="{top + 22}" class="label">{min(values):.4g} — {max(values):.4g}</text>'
             f'<line x1="50" y1="{top + panel_height - 20}" x2="1130" y2="{top + panel_height - 20}" class="axis"/>'
             f'<polyline points="{_line(rows, width=width, top=top, height=panel_height)}" stroke="{colour}" class="series"/>'
+            f'<text x="50" y="{top + panel_height - 4}" class="label">{rows[0]["observed_on"]}</text>'
+            f'<text x="1060" y="{top + panel_height - 4}" class="label">{rows[-1]["observed_on"]}</text>'
         )
     metadata = {
         name: {"rows": len(rows), "source": rows[0]["source"] if rows else None}

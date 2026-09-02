@@ -44,6 +44,9 @@ class CollectionError(RuntimeError):
     pass
 
 
+HISTORY_PERIODS = {"m1", "m6", "y1"}
+
+
 def _now() -> datetime:
     return datetime.now(SHANGHAI).replace(microsecond=0)
 
@@ -82,12 +85,14 @@ def collect_jd_latest(*, retrieved_at: datetime | None = None) -> dict:
     }
 
 
-def collect_jd_month(*, retrieved_at: datetime | None = None) -> list[dict]:
-    """Fetch the vendor's daily one-month chart for the JD ZheShang product."""
+def collect_jd_history(*, period_type: str = "m1", retrieved_at: datetime | None = None) -> list[dict]:
+    """Fetch a vendor daily chart; the public API supports one month, six months and one year."""
+    if period_type not in HISTORY_PERIODS:
+        raise ValueError(f"period_type must be one of {sorted(HISTORY_PERIODS)}")
     received = retrieved_at or _now()
     response = httpx.post(
         JD_MONTH_URL,
-        json={"productSku": JD_PRODUCT_SKU, "periodType": "m1"},
+        json={"productSku": JD_PRODUCT_SKU, "periodType": period_type},
         headers=HEADERS,
         timeout=20,
     )
@@ -115,6 +120,11 @@ def collect_jd_month(*, retrieved_at: datetime | None = None) -> list[dict]:
             "availability_basis": "retrieved_after_the_fact",
         })
     return output
+
+
+def collect_jd_month(*, retrieved_at: datetime | None = None) -> list[dict]:
+    """Backward-compatible one-month daily chart collector."""
+    return collect_jd_history(period_type="m1", retrieved_at=retrieved_at)
 
 
 def collect_jd_intraday(*, retrieved_at: datetime | None = None) -> list[dict]:
@@ -203,7 +213,13 @@ def collect_factor_panel(*, start: date, end: date, retrieved_at: datetime | Non
     if start > end:
         raise ValueError("start must not be after end")
     received = retrieved_at or _now()
-    panel = {"jd_zheshang_gold": collect_jd_month(retrieved_at=received)}
+    days = (end - start).days
+    period_type = "m1" if days <= 31 else "m6" if days <= 183 else "y1"
+    jd_rows = [row for row in collect_jd_history(period_type=period_type, retrieved_at=received)
+               if start.isoformat() <= row["observed_on"] <= end.isoformat()]
+    if not jd_rows:
+        raise CollectionError("JD ZheShang chart has no rows in the requested range")
+    panel = {"jd_zheshang_gold": jd_rows}
     for name, fred_id, unit, invert in FRED_FACTORS:
         panel[name] = collect_fred_factor(
             name, fred_id, unit, invert, start=start, end=end, retrieved_at=received,

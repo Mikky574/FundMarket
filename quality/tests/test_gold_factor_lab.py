@@ -19,6 +19,24 @@ def test_jd_collector_marks_history_as_known_only_at_retrieval(monkeypatch):
     assert row["available_at"] == received.isoformat()
 
 
+def test_jd_history_accepts_six_month_period(monkeypatch):
+    class Response:
+        def raise_for_status(self): pass
+        def json(self):
+            return {"success": True, "resultData": {"data": {"line": [
+                {"date": "20260603", "price": "800.00"},
+            ]}}}
+
+    observed = {}
+    def post(_url, **kwargs):
+        observed.update(kwargs["json"])
+        return Response()
+    monkeypatch.setattr(collector.httpx, "post", post)
+    rows = collector.collect_jd_history(period_type="m6")
+    assert observed["periodType"] == "m6"
+    assert rows[0]["observed_on"] == "2026-06-03"
+
+
 def test_jd_intraday_collector_preserves_source_timestamp(monkeypatch):
     class Response:
         def raise_for_status(self): pass
