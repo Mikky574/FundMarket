@@ -6,7 +6,7 @@ import threading
 import time
 from pathlib import Path
 
-from app.config import settings
+from src.config import settings
 
 DB_PATH = Path(settings.database_root).expanduser().resolve() / "market_cache.sqlite3"
 _lock = threading.RLock()

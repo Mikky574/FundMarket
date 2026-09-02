@@ -2,10 +2,10 @@ from datetime import date
 
 import pytest
 
-from app.models import Quote, StockItem
-from app.service import StockService, normalize_symbol
-from app.market_store import same_refresh_window
-from app.fund_service import _ensure_short_returns
+from src.quant_research.models import Quote, StockItem
+from src.quant_research.stock_service import StockService, normalize_symbol
+from src.quant_research.cache_store import same_refresh_window
+from src.quant_research.fund_data import _ensure_short_returns
 
 
 class FakeProvider:

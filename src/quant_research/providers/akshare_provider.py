@@ -3,8 +3,8 @@ from datetime import date, datetime, timedelta
 import akshare as ak
 import pandas as pd
 
-from app.models import Candle, Quote, StockItem
-from app.providers.base import StockProvider
+from src.quant_research.models import Candle, Quote, StockItem
+from src.quant_research.providers.base import StockProvider
 
 
 def _number(value):

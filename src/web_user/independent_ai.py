@@ -13,9 +13,9 @@ from pathlib import Path
 
 from fastapi import HTTPException
 
-from app.config import settings
-from app.fund_service import get_fund_overview
-from app.user_trading import portfolio
+from src.config import settings
+from src.quant_research.fund_data import get_fund_overview
+from src.web_user.trading import portfolio
 
 DISPLAY_NAMES = {"025491": "平安中证卫星产业指数C"}
 

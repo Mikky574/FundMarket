@@ -2,10 +2,10 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from app import public_ai_research
-from app.market_intelligence import collect_news
-from app.market_intelligence import opportunity_candidates
-from app.fund_research import fund_research_card
+from src.qq_control import draft_research as public_ai_research
+from src.quant_research.intelligence import collect_news
+from src.quant_research.intelligence import opportunity_candidates
+from src.quant_research.fund_signals import fund_research_card
 
 
 def test_validate_draft_forces_unexecuted_confirmation():
@@ -38,8 +38,8 @@ def test_collect_news_drops_old_and_undated_items(monkeypatch):
         def __enter__(self): return self
         def __exit__(self, *args): return False
 
-    monkeypatch.setattr("app.market_intelligence.settings.market_news_rss_urls", "https://x/rss")
-    monkeypatch.setattr("app.market_intelligence.urlopen", lambda *_args, **_kwargs: Response())
+    monkeypatch.setattr("src.quant_research.intelligence.settings.market_news_rss_urls", "https://x/rss")
+    monkeypatch.setattr("src.quant_research.intelligence.urlopen", lambda *_args, **_kwargs: Response())
     now = datetime(2026, 8, 12, 10, tzinfo=timezone.utc)
     assert [item["title"] for item in collect_news(now)] == ["recent"]
 

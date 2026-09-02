@@ -6,9 +6,10 @@ write capabilities accidentally.
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 
-from app import evaluation_service, public_ai_control
-from app.api.dependencies import require_local_bridge
-from app.api.schemas import (
+from src.historical_evaluation import service as evaluation_service
+from src.qq_control import ledger_control as public_ai_control
+from src.qq_control.dependencies import require_local_bridge
+from src.qq_control.schemas import (
     EvaluationMarketImport,
     EvaluationNewsImport,
     EvaluationPredictionRequest,
@@ -19,8 +20,8 @@ from app.api.schemas import (
     PublicAiOrderRequest,
     PublicAiSettleRequest,
 )
-from app.market_intelligence import refresh_public_market_display
-from app.portfolio_service import get_portfolio_dashboard
+from src.quant_research.intelligence import refresh_public_market_display
+from src.qq_control.portfolio_view import get_portfolio_dashboard
 
 router = APIRouter(prefix="/api/v1/internal", include_in_schema=False)
 

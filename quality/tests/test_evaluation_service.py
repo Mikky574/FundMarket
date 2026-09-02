@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from app import evaluation_service
+from src.historical_evaluation import service as evaluation_service
 
 
 @pytest.fixture(autouse=True)

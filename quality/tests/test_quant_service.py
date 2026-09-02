@@ -1,4 +1,4 @@
-from app.quant_service import compute_fund_signals
+from src.quant_research.market_brief import compute_fund_signals
 
 
 def test_compute_fund_signals_has_explainable_metrics():

@@ -10,7 +10,7 @@ from datetime import date, datetime, timezone
 from math import sqrt
 from statistics import pstdev
 
-from app.fund_service import get_fund_overview
+from src.quant_research.fund_data import get_fund_overview
 
 
 DATA_SOURCE = "AkShare / Eastmoney public fund NAV"

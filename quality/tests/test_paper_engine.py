@@ -4,7 +4,7 @@ import pytest
 
 import pandas as pd
 
-from app.paper_engine import PaperLedger, order_schedule_after_cutoff
+from src.qq_control.paper_ledger import PaperLedger, order_schedule_after_cutoff
 
 
 def test_order_schedule_after_cutoff():
@@ -137,7 +137,7 @@ def test_buy_uses_nav_date_before_confirmation_date(tmp_path, monkeypatch):
     ledger.register_buy("O1", "2026-07-22", "2026-07-23", "2026-07-24",
                         "018099", "测试基金", Decimal("20000"), Decimal("0"), [], "test")
     frame = pd.DataFrame([{"净值日期": "2026-07-23", "单位净值": 1.25}])
-    monkeypatch.setattr("app.paper_engine.ak.fund_open_fund_info_em", lambda *_: frame)
+    monkeypatch.setattr("src.qq_control.paper_ledger.ak.fund_open_fund_info_em", lambda *_: frame)
 
     transactions = ledger.settle_due_buys("2026-07-23")
 

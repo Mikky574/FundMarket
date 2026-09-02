@@ -7,24 +7,24 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.config import settings
-from app.fund_service import get_fund_overview, search_funds
-from app.models import ErrorResponse, HistoryResponse, Quote, StockItem
-from app.market_store import cache_stats
-from app.portfolio_service import get_portfolio_dashboard
-from app.quant_service import market_brief
-from app.market_intelligence import (latest as latest_market_intelligence, refresh_public_market_display as refresh_public_market_artifacts,
+from src.config import settings
+from src.quant_research.fund_data import get_fund_overview, search_funds
+from src.quant_research.models import ErrorResponse, HistoryResponse, Quote, StockItem
+from src.quant_research.cache_store import cache_stats
+from src.qq_control.portfolio_view import get_portfolio_dashboard
+from src.quant_research.market_brief import market_brief
+from src.quant_research.intelligence import (latest as latest_market_intelligence, refresh_public_market_display as refresh_public_market_artifacts,
                                      watchlist as market_watchlist)
-from app.providers.akshare_provider import AkShareProvider
-from app.service import StockService, normalize_symbol
-from app.user_trading import (BuyOrder, Credentials, SellOrder, cancel_order, create_buy,
+from src.quant_research.providers.akshare_provider import AkShareProvider
+from src.quant_research.stock_service import StockService, normalize_symbol
+from src.web_user.trading import (BuyOrder, Credentials, SellOrder, cancel_order, create_buy,
                               create_sell, current_user, login, logout, portfolio, preset_position, register,
                               PresetPosition)
-from app import user_ai
-from app import public_ai_control
-from app import evaluation_service
-from app.api.internal import router as internal_router
-from app.api.users import router as users_router
+from src.web_user import independent_ai as user_ai
+from src.qq_control import ledger_control as public_ai_control
+from src.historical_evaluation import service as evaluation_service
+from src.qq_control.api import router as internal_router
+from src.web_user.api import router as users_router
 from pydantic import BaseModel, Field
 
 app = FastAPI(
@@ -33,7 +33,8 @@ app = FastAPI(
     description="中国 A 股统一行情接口。数据仅供研究，不构成投资建议。",
 )
 service = StockService(AkShareProvider())
-app.mount("/static", StaticFiles(directory="app/static"), name="static")
+STATIC_DIR = Path(__file__).resolve().parent / "web_user" / "static"
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 app.include_router(internal_router)
 app.include_router(users_router)
 
@@ -202,7 +203,7 @@ def user_cancel(order_id: int, user: dict = Depends(current_user)):
 
 @app.get("/", include_in_schema=False)
 def dashboard():
-    html = Path("app/static/index.html").read_text(encoding="utf-8")
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     html = html.replace("dashboard.js?v=20260726-14", "dashboard.js?v=20260804-23")
     return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
@@ -390,7 +391,7 @@ def evaluation_score(session_id: str, request: Request):
 
 @app.get("/fund", include_in_schema=False)
 def fund_dashboard():
-    return FileResponse("app/static/fund.html")
+    return FileResponse(STATIC_DIR / "fund.html")
 
 
 @app.get("/api/v1/funds/{code}", tags=["funds"])

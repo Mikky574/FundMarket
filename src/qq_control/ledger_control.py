@@ -10,8 +10,8 @@ from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
-from app.paper_engine import PaperLedger, fetch_trading_dates, order_schedule_after_cutoff
-from app.portfolio_service import get_portfolio_dashboard
+from src.qq_control.paper_ledger import PaperLedger, fetch_trading_dates, order_schedule_after_cutoff
+from src.qq_control.portfolio_view import get_portfolio_dashboard
 
 
 ROOT = Path(__file__).resolve().parents[1]

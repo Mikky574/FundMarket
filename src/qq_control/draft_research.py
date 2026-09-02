@@ -13,8 +13,8 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
-from app.config import settings
-from app.market_intelligence import latest
+from src.config import settings
+from src.quant_research.intelligence import latest
 
 ALLOWED_ACTIONS = {"WATCH", "BUY", "ADD", "REDUCE", "SELL", "REBALANCE"}
 

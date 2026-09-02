@@ -3,10 +3,10 @@ from datetime import date
 
 from cachetools import TTLCache
 
-from app.config import settings
-from app.models import Candle, Quote, StockItem
-from app.market_store import get_aligned_cache, get_cache, put_cache, record_search
-from app.providers.base import StockProvider
+from src.config import settings
+from src.quant_research.models import Candle, Quote, StockItem
+from src.quant_research.cache_store import get_aligned_cache, get_cache, put_cache, record_search
+from src.quant_research.providers.base import StockProvider
 
 
 SYMBOL_PATTERN = re.compile(r"^(?:(SH|SZ|BJ)[.:-]?)?(\d{6})$", re.IGNORECASE)

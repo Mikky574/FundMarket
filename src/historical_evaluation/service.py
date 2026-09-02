@@ -12,7 +12,7 @@ import uuid
 from datetime import datetime, time
 from pathlib import Path
 
-from app.config import settings
+from src.config import settings
 
 
 def _root() -> Path:

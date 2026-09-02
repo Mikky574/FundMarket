@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from datetime import date
 
-from app.models import Candle, Quote, StockItem
+from src.quant_research.models import Candle, Quote, StockItem
 
 
 class StockProvider(ABC):

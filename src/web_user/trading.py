@@ -15,8 +15,8 @@ import akshare as ak
 from fastapi import Cookie, HTTPException
 from pydantic import BaseModel, Field
 
-from app.config import settings
-from app.fund_service import get_fund_overview
+from src.config import settings
+from src.quant_research.fund_data import get_fund_overview
 
 
 DB_PATH = Path(settings.database_root).resolve() / "user_trading.sqlite3"

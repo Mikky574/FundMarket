@@ -3,8 +3,8 @@ import sqlite3
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
-import app.user_trading as trading
-from app.main import app
+import src.web_user.trading as trading
+from src.main import app
 
 
 def test_schedule_uses_real_open_days_and_strict_15_cutoff():

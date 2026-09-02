@@ -5,9 +5,9 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from app import user_ai
-from app.config import settings
-from app.user_trading import (
+from src.web_user import independent_ai as user_ai
+from src.config import settings
+from src.web_user.trading import (
     BuyOrder,
     Credentials,
     PresetPosition,

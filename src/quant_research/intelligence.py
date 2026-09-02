@@ -16,11 +16,11 @@ from urllib.request import Request, urlopen
 
 import httpx
 
-from app.config import settings
-from app.fund_service import get_fund_overview
-from app.fund_research import fund_research_card
-from app.providers.akshare_provider import AkShareProvider
-from app.service import StockService
+from src.config import settings
+from src.quant_research.fund_data import get_fund_overview
+from src.quant_research.fund_signals import fund_research_card
+from src.quant_research.providers.akshare_provider import AkShareProvider
+from src.quant_research.stock_service import StockService
 
 
 def _now() -> str:

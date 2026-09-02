@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from app.benchmark_engine import calculate_record
+from src.historical_evaluation.benchmark import calculate_record
 
 
 def test_benchmark_and_excess_returns():

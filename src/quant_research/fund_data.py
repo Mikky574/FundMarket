@@ -1,8 +1,8 @@
 from cachetools import TTLCache
 import akshare as ak
 import pandas as pd
-from app.config import settings
-from app.market_store import (get_aligned_cache, get_aligned_caches_by_prefix, get_cache,
+from src.config import settings
+from src.quant_research.cache_store import (get_aligned_cache, get_aligned_caches_by_prefix, get_cache,
                               put_cache, record_search)
 
 
