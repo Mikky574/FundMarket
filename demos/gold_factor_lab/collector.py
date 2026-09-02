@@ -18,6 +18,7 @@ import httpx
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 JD_PRODUCT_SKU = "1961543816"
 JD_MONTH_URL = "https://ms.jr.jd.com/gw2/generic/hj/h5/m/cfGetQuotesPriceKLine"
+JD_INTRADAY_URL = "https://ms.jr.jd.com/gw2/generic/hj/h5/m/cfGetPriceTrendChart"
 FRED_CSV_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv"
 HEADERS = {
     "User-Agent": "FundMarket-gold-factor-lab/0.1",
@@ -87,6 +88,46 @@ def collect_jd_month(*, retrieved_at: datetime | None = None) -> list[dict]:
             # a historical point can only be used from this collection moment.
             "available_at": received.isoformat(),
             "availability_basis": "retrieved_after_the_fact",
+        })
+    return output
+
+
+def collect_jd_intraday(*, retrieved_at: datetime | None = None) -> list[dict]:
+    """Fetch the current trading day's public minute/tick trend.
+
+    The endpoint currently returns intraday points only.  It must therefore be
+    polled and archived by a future approved data store if we want a multi-day
+    minute-level research set; the demo deliberately keeps no local data.
+    """
+    received = retrieved_at or _now()
+    response = httpx.post(
+        JD_INTRADAY_URL,
+        json={"appChannel": "11", "beginTime": "", "priceType": "buy", "productSku": JD_PRODUCT_SKU},
+        headers=HEADERS,
+        timeout=20,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    rows = payload.get("resultData", {}).get("data", {}).get("dataList", []) if isinstance(payload, dict) else []
+    if not payload.get("success") or not isinstance(rows, list) or not rows:
+        raise CollectionError("JD ZheShang intraday trend was unavailable")
+    output = []
+    for item in rows:
+        try:
+            source_at = datetime.strptime(str(item["goldPriceTime"]), "%Y-%m-%d %H:%M:%S").replace(tzinfo=SHANGHAI)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise CollectionError("JD ZheShang intraday trend contains an invalid timestamp") from exc
+        output.append({
+            "series": "jd_zheshang_gold",
+            "source_at": source_at.isoformat(),
+            "value": _positive_decimal(item.get("goldPrice"), "JD intraday price"),
+            "unit": "cny_per_gram",
+            "source": "jd_zheshang_public_intraday_chart",
+            "retrieved_at": received.isoformat(),
+            "available_at": received.isoformat(),
+            "availability_basis": "observed_live_quote",
+            "is_high": bool(item.get("highKey")),
+            "is_low": bool(item.get("lowKey")),
         })
     return output
 

@@ -19,6 +19,20 @@ def test_jd_collector_marks_history_as_known_only_at_retrieval(monkeypatch):
     assert row["available_at"] == received.isoformat()
 
 
+def test_jd_intraday_collector_preserves_source_timestamp(monkeypatch):
+    class Response:
+        def raise_for_status(self): pass
+        def json(self):
+            return {"success": True, "resultData": {"data": {"dataList": [
+                {"goldPriceTime": "2026-09-03 10:01:00", "goldPrice": "945.43", "highKey": True},
+            ]}}}
+
+    monkeypatch.setattr(collector.httpx, "post", lambda *_args, **_kwargs: Response())
+    row = collector.collect_jd_intraday(retrieved_at=datetime(2026, 9, 3, 2, 2, tzinfo=timezone.utc))[0]
+    assert row["source_at"] == "2026-09-03T10:01:00+08:00"
+    assert row["is_high"] is True
+
+
 def test_describe_reports_gold_return_and_does_not_make_a_signal():
     panel = {
         "jd_zheshang_gold": [

@@ -1,6 +1,12 @@
 # 黄金因子实验室 Demo
 
-这是一个与网站、QQ、账本及生产评估数据完全隔离的只读实验：采集京东浙商积存金近一月日线，以及美国十年期名义/实际利率、广义美元指数、美元兑人民币、WTI 原油五类解释变量；输出描述统计与数据覆盖率，不产生交易指令。
+这是一个与网站、QQ、账本及生产评估数据完全隔离的只读实验。实时主线是京东浙商积存金分钟走势；日线与美国十年期名义/实际利率、广义美元指数、美元兑人民币、WTI 原油仅作为慢变量背景，不产生交易指令。
+
+实时快照（默认仅取一次，不写文件）：
+
+```powershell
+.\.venv\Scripts\python.exe demos\gold_factor_lab\watch_live.py --samples 1
+```
 
 ```powershell
 .\.venv\Scripts\python.exe demos\gold_factor_lab\run_demo.py --start 2026-08-03 --end 2026-09-03
