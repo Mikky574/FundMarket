@@ -185,7 +185,7 @@ def run_quant_snapshot() -> dict:
     """Run the existing reproducible industry scorer and retain its immutable output."""
     timestamp = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S")
     output = _root() / "quant" / f"{timestamp}.json"
-    script = Path("scripts/market_snapshot.py").resolve()
+    script = Path("tools/market_snapshot.py").resolve()
     completed = subprocess.run([sys.executable, str(script), "--output", str(output),
                                 "--max-industries", str(settings.market_intelligence_max_industries)],
                                cwd=Path.cwd(), capture_output=True, text=True, encoding="utf-8",
@@ -230,6 +230,9 @@ def refresh_public_market_display() -> dict:
         "candidate_count": quant.get("candidate_count"),
         "research_summary_refreshed": False,
     }
+    if not settings.deepseek_realtime_enabled:
+        result["research_summary_skipped"] = "DeepSeek realtime refresh is disabled"
+        return result
     try:
         intelligence = refresh_intelligence(quant)
         result["research_summary_refreshed"] = True

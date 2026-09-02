@@ -11,6 +11,9 @@ class Settings(BaseSettings):
     # the file option exists for the current local deployment only.
     deepseek_api_key: str = ""
     deepseek_api_key_file: str = r"..\deepseek-Api.txt"
+    # DeepSeek is deliberately opt-in.  A market/dashboard refresh must never
+    # create an external LLM request merely because a key is configured.
+    deepseek_realtime_enabled: bool = False
     market_intelligence_root: str = "market_intelligence"
     market_news_rss_urls: str = ""
     market_intelligence_http_timeout_seconds: int = 45

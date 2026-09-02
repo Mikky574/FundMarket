@@ -1,4 +1,4 @@
-"""Run 10-minute quant refreshes and an hourly DeepSeek research refresh."""
+"""Run 10-minute quant refreshes; DeepSeek refresh is explicit opt-in."""
 from __future__ import annotations
 
 import argparse
@@ -25,7 +25,12 @@ from src.quant_research.intelligence import refresh_intelligence, refresh_quant_
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--once", action="store_true", help="Generate one dated research packet and exit")
+    parser.add_argument("--once", action="store_true", help="Refresh one quant snapshot and exit")
+    parser.add_argument(
+        "--enable-deepseek",
+        action="store_true",
+        help="Also perform DeepSeek refreshes (disabled by default).",
+    )
     args = parser.parse_args()
     last_quant_window: int | None = None
     last_llm_window: int | None = None
@@ -43,7 +48,7 @@ def main() -> None:
                     one_shot_failed = True
                 last_quant_window = quant_window
             llm_window = int(now.timestamp() // 3600)
-            if llm_window != last_llm_window:
+            if args.enable_deepseek and llm_window != last_llm_window:
                 try:
                     packet = refresh_intelligence(quant)
                     print(f"{packet['generated_at']} DeepSeek intelligence refreshed", flush=True)
@@ -53,6 +58,8 @@ def main() -> None:
                 last_llm_window = llm_window
                 if args.once:
                     raise SystemExit(1 if one_shot_failed else 0)
+            if args.once:
+                raise SystemExit(1 if one_shot_failed else 0)
             time.sleep(20)
 
 

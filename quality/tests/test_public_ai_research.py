@@ -5,6 +5,8 @@ import pytest
 from src.qq_control import draft_research as public_ai_research
 from src.quant_research.intelligence import collect_news
 from src.quant_research.intelligence import opportunity_candidates
+from src.quant_research.intelligence import refresh_public_market_display
+from src.quant_research import gold_prices
 from src.quant_research.fund_signals import fund_research_card
 
 
@@ -55,6 +57,41 @@ def test_opportunity_candidates_require_observable_confirmation():
     assert result[0]["industry"] == "测试行业"
     assert result[0]["confirmation_conditions"]
     assert result[0]["invalidation_conditions"]
+
+
+def test_market_refresh_does_not_call_deepseek_when_realtime_is_disabled(monkeypatch):
+    monkeypatch.setattr("src.quant_research.intelligence.settings.deepseek_realtime_enabled", False)
+    monkeypatch.setattr(
+        "src.quant_research.intelligence.refresh_quant_snapshot",
+        lambda: {"snapshot_at": "2026-09-03T10:00:00+08:00", "data_through": "2026-09-03", "candidate_count": 2},
+    )
+    monkeypatch.setattr(
+        "src.quant_research.intelligence.refresh_intelligence",
+        lambda _quant: pytest.fail("DeepSeek must not run during a normal market refresh"),
+    )
+
+    result = refresh_public_market_display()
+
+    assert result["research_summary_refreshed"] is False
+    assert result["research_summary_skipped"] == "DeepSeek realtime refresh is disabled"
+
+
+def test_gold_history_keeps_retrieval_time_in_strict_mode(monkeypatch):
+    class Response:
+        def raise_for_status(self): pass
+        def json(self):
+            return {"success": True, "resultData": {"data": {"line": [
+                {"date": "20260803", "price": "879.46", "raisePercent": "0.0000"},
+            ]}}}
+
+    monkeypatch.setattr(gold_prices.httpx, "post", lambda *_args, **_kwargs: Response())
+    received = datetime(2026, 9, 3, 12, tzinfo=timezone.utc)
+
+    rows = gold_prices.fetch_one_month_history(retrieved_at=received)
+
+    assert rows[0]["as_of"] == "2026-08-03"
+    assert rows[0]["available_at"] == received.isoformat()
+    assert rows[0]["availability_basis"] == "retrieved_after_the_fact"
 
 
 def test_fund_research_marks_hot_fund_without_calling_it_a_buy_signal():
