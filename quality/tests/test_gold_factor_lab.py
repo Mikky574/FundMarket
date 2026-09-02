@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 
 from demos.gold_factor_lab.analysis import describe
 from demos.gold_factor_lab import collector
+from demos.gold_factor_lab.history_chart import build_html
 
 
 def test_jd_collector_marks_history_as_known_only_at_retrieval(monkeypatch):
@@ -66,3 +67,23 @@ def test_describe_reports_gold_return_and_does_not_make_a_signal():
     assert result["scope"].startswith("descriptive_only")
     assert result["gold"]["return_percent"] == 9.901
     assert "signal" not in result
+
+
+def test_history_chart_separates_units_and_states_attribution_limit():
+    panel = {
+        "jd_zheshang_gold": [
+            {"observed_on": "2026-08-01", "value": 800, "source": "jd"},
+            {"observed_on": "2026-08-02", "value": 808, "source": "jd"},
+        ],
+        "usd_cny": [
+            {"observed_on": "2026-08-01", "value": 7.1, "source": "fred"},
+            {"observed_on": "2026-08-02", "value": 7.2, "source": "fred"},
+        ],
+        "us_10y_nominal_yield": [
+            {"observed_on": "2026-08-01", "value": 4.2, "source": "fred"},
+            {"observed_on": "2026-08-02", "value": 4.1, "source": "fred"},
+        ],
+    }
+    rendered = build_html(panel)
+    assert "同尺度比较" in rendered
+    assert "不能严谨地把本段涨跌归因" in rendered
