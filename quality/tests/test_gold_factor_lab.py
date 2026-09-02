@@ -4,6 +4,7 @@ from demos.gold_factor_lab.analysis import describe
 from demos.gold_factor_lab import collector
 from demos.gold_factor_lab.history_chart import build_html
 from demos.gold_factor_lab.blind_replay import Decision, anonymised_prompt, local_tool_decision, replay, third_prior_month
+from tools.deepseek_blind_gold_tool import invoke
 
 
 def test_jd_collector_marks_history_as_known_only_at_retrieval(monkeypatch):
@@ -127,3 +128,18 @@ def test_blind_replay_uses_local_tool_without_sending_calendar_dates(monkeypatch
     assert result.action == "BUY"
     assert sent["url"] == "http://local/tool"
     assert "2026-" not in str(sent["json"])
+
+
+def test_sandbox_tool_only_accepts_the_blind_contract(monkeypatch):
+    class Response:
+        def raise_for_status(self): pass
+        def json(self): return {"action": "HOLD", "confidence": 0.4}
+
+    monkeypatch.setattr("tools.deepseek_blind_gold_tool.httpx.post", lambda *_args, **_kwargs: Response())
+    assert invoke({"position": "cash", "rule_candidate": "HOLD", "observations": [{"day": 1}]})["action"] == "HOLD"
+    try:
+        invoke({"position": "cash", "rule_candidate": "HOLD", "observations": [], "date": "2026-01-01"})
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("the tool accepted a non-blind field")
