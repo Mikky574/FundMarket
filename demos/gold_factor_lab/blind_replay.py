@@ -37,6 +37,9 @@ class Decision:
     direction_confidence: float = 0.0
     macro_score: int = 0
     macro_available: int = 0
+    horizon_direction: str = "FLAT"
+    horizon_confidence: float = 0.0
+    technical_regime: str = "unknown"
 
 
 def third_prior_month(reference: date) -> tuple[date, date]:
@@ -78,6 +81,20 @@ def _macro_context(history: list[dict]) -> tuple[int, int, bool, list[str]]:
     return score, available, oil_risk, labels
 
 
+def _technical_context(history: list[dict]) -> dict[str, float | None]:
+    """Compute date-free support, resistance and trend features for the LLM."""
+    prices = [float(row["price"]) for row in history]
+    if len(prices) < 21:
+        return {"sma5": None, "sma20": None, "momentum5_pct": None, "momentum20_pct": None,
+                "distance_to_resistance20_pct": None, "distance_to_support20_pct": None}
+    resistance, support = max(prices[-21:-1]), min(prices[-21:-1])
+    return {"sma5": round(_sma(prices, 5), 4), "sma20": round(_sma(prices, 20), 4),
+            "momentum5_pct": round((prices[-1] / prices[-6] - 1) * 100, 3),
+            "momentum20_pct": round((prices[-1] / prices[-21] - 1) * 100, 3),
+            "distance_to_resistance20_pct": round((prices[-1] / resistance - 1) * 100, 3),
+            "distance_to_support20_pct": round((prices[-1] / support - 1) * 100, 3)}
+
+
 def rule_decision(history: list[dict], *, in_position: bool, held_days: int, cooldown_days: int) -> Decision:
     """A conservative, fee-aware trend rule with hysteresis.
 
@@ -104,9 +121,10 @@ def rule_decision(history: list[dict], *, in_position: bool, held_days: int, coo
 def anonymised_prompt(history: list[dict], *, in_position: bool, rule: Decision) -> str:
     """Create the exact model input; it intentionally has no calendar date."""
     rows = []
-    for index, row in enumerate(history[-WARMUP_DAYS:], start=max(1, len(history) - WARMUP_DAYS + 1)):
+    start_index = max(0, len(history) - WARMUP_DAYS)
+    for absolute_index, row in enumerate(history[start_index:], start=start_index):
         rows.append({
-            "day": index,
+            "day": absolute_index + 1,
             "gold_cny_per_gram": round(float(row["price"]), 4),
             "gold_return_1d_pct": round(float(row.get("return_1d", 0)) * 100, 3),
             "usd_cny": row.get("usd_cny"),
@@ -114,6 +132,7 @@ def anonymised_prompt(history: list[dict], *, in_position: bool, rule: Decision)
             "us_10y_real_yield": row.get("us_10y_real_yield"),
             "us_10y_nominal_yield": row.get("us_10y_nominal_yield"),
             "wti_crude": row.get("wti_crude"),
+            **_technical_context(history[:absolute_index + 1]),
         })
     payload = {
         "experiment": "daily historical blind replay",
@@ -126,7 +145,7 @@ def anonymised_prompt(history: list[dict], *, in_position: bool, rule: Decision)
     return (
         "You are a constrained research classifier, not an investment adviser. "
         "Do not infer dates and do not ask for future data. Return JSON only: "
-        '{"next_day_direction":"UP|DOWN|FLAT","direction_confidence":0..1,"action":"BUY|SELL|HOLD","confidence":0..1,"reason":"under 160 chars"}. '
+        '{"next_day_direction":"UP|DOWN|FLAT","direction_confidence":0..1,"horizon_5_10_direction":"UP|DOWN|FLAT","horizon_confidence":0..1,"technical_regime":"breakout|trend_continuation|near_resistance|near_support|range|breakdown|uncertain","action":"BUY|SELL|HOLD","confidence":0..1,"reason":"under 160 chars"}. '
         "BUY means move from cash to gold; SELL means move from gold to cash. "
         "Use only the sequential observations supplied below.\n"
         + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
@@ -148,7 +167,12 @@ def local_tool_decision(history: list[dict], *, in_position: bool, rule: Decisio
     if direction not in {"UP", "DOWN", "FLAT"}:
         direction = "FLAT"
     direction_confidence = min(1.0, max(0.0, float(data.get("direction_confidence", 0))))
-    return Decision(action, confidence, str(data.get("reason", "no reason"))[:160], "deepseek_tool", direction, direction_confidence)
+    horizon_direction = str(data.get("horizon_5_10_direction", "FLAT")).upper()
+    if horizon_direction not in {"UP", "DOWN", "FLAT"}:
+        horizon_direction = "FLAT"
+    horizon_confidence = min(1.0, max(0.0, float(data.get("horizon_confidence", 0))))
+    regime = str(data.get("technical_regime", "unknown"))[:40]
+    return Decision(action, confidence, str(data.get("reason", "no reason"))[:160], "deepseek_tool", direction, direction_confidence, 0, 0, horizon_direction, horizon_confidence, regime)
 
 
 def _daily_rows(panel: dict[str, list[dict]]) -> list[dict]:

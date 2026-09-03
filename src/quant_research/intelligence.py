@@ -361,7 +361,8 @@ def analyse_blind_gold(observations: list[dict], position: str, rule_candidate: 
     if position not in {"cash", "long_gold"} or rule_candidate not in {"BUY", "SELL", "HOLD"}:
         raise ValueError("invalid blind gold state")
     allowed = {"day", "gold_cny_per_gram", "gold_return_1d_pct", "usd_cny", "broad_us_dollar",
-               "us_10y_real_yield", "us_10y_nominal_yield", "wti_crude"}
+               "us_10y_real_yield", "us_10y_nominal_yield", "wti_crude", "sma5", "sma20",
+               "momentum5_pct", "momentum20_pct", "distance_to_resistance20_pct", "distance_to_support20_pct"}
     if any(not isinstance(item, dict) or set(item) - allowed or "day" not in item for item in observations):
         raise ValueError("blind gold rows contain unsupported fields")
     key = _read_key()
@@ -371,7 +372,8 @@ def analyse_blind_gold(observations: list[dict], position: str, rule_candidate: 
                 "execution": "decision fills at next observed daily quote; buy fee 0%, sell fee 0.4%",
                 "position": position, "rule_candidate": rule_candidate, "recent_observations": observations}
     prompt = ("You are a constrained research classifier, not an investment adviser. Do not infer dates or request future data. "
-              "Return only {\"next_day_direction\":\"UP|DOWN|FLAT\",\"direction_confidence\":0..1,\"action\":\"BUY|SELL|HOLD\",\"confidence\":0..1,\"reason\":\"under 160 chars\"}. "
+              "Assess trend continuation, a confirmed breakout above prior 20-session resistance, false-breakout risk, support failure, and whether macro context conflicts. "
+              "Return only {\"next_day_direction\":\"UP|DOWN|FLAT\",\"direction_confidence\":0..1,\"horizon_5_10_direction\":\"UP|DOWN|FLAT\",\"horizon_confidence\":0..1,\"technical_regime\":\"breakout|trend_continuation|near_resistance|near_support|range|breakdown|uncertain\",\"action\":\"BUY|SELL|HOLD\",\"confidence\":0..1,\"reason\":\"under 160 chars\"}. "
               "BUY means move from cash to gold; SELL means move from gold to cash. Use only this sequential evidence:\n" +
               json.dumps(evidence, ensure_ascii=False, separators=(",", ":")))
     response = httpx.post("https://api.deepseek.com/chat/completions", headers={"Authorization": f"Bearer {key}"},
@@ -395,7 +397,15 @@ def analyse_blind_gold(observations: list[dict], position: str, rule_candidate: 
         direction_confidence = min(1.0, max(0.0, float(data.get("direction_confidence", 0))))
     except (TypeError, ValueError):
         direction_confidence = 0.0
-    return {"action": action, "confidence": confidence, "next_day_direction": direction, "direction_confidence": direction_confidence, "reason": str(data.get("reason", "no reason"))[:160],
+    horizon_direction = str(data.get("horizon_5_10_direction", "FLAT")).upper()
+    if horizon_direction not in {"UP", "DOWN", "FLAT"}:
+        horizon_direction = "FLAT"
+    try:
+        horizon_confidence = min(1.0, max(0.0, float(data.get("horizon_confidence", 0))))
+    except (TypeError, ValueError):
+        horizon_confidence = 0.0
+    regime = str(data.get("technical_regime", "unknown"))[:40]
+    return {"action": action, "confidence": confidence, "next_day_direction": direction, "direction_confidence": direction_confidence, "horizon_5_10_direction": horizon_direction, "horizon_confidence": horizon_confidence, "technical_regime": regime, "reason": str(data.get("reason", "no reason"))[:160],
             "model": "deepseek-v4-flash", "research_only": True}
 
 

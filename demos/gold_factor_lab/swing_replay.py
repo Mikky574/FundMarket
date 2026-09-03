@@ -28,9 +28,12 @@ def _trend_entry(history: list[dict]) -> tuple[bool, int]:
     prices = [float(row["price"]) for row in history]
     price, sma5, sma20 = prices[-1], _sma(prices, 5), _sma(prices, 20)
     momentum20 = price / prices[-21] - 1
+    prior_resistance = max(prices[-21:-1])
     macro_score, macro_available, oil_risk, _labels = _macro_context(history)
     macro_ok = macro_available < 2 or macro_score >= 0
-    return price > sma5 > sma20 and momentum20 >= 0.03 and macro_ok and not oil_risk, macro_score
+    continuation = price > sma5 > sma20 and momentum20 >= 0.03
+    confirmed_breakout = price > sma20 and price >= prior_resistance * 1.003
+    return (continuation or confirmed_breakout) and macro_ok and not oil_risk, macro_score
 
 
 def _model_veto(history: list[dict], *, in_position: bool, tool_url: str) -> Decision:
@@ -47,19 +50,20 @@ def replay(rows: list[dict], *, start: date, end: date, tool_url: str, use_deeps
         if not start <= signal_date <= end:
             continue
         entry_ok, macro_score = _trend_entry(rows[:index + 1])
-        exit_now = grams > 0 and held_days >= 5 and (not entry_ok or macro_score <= -2 or held_days >= 10)
+        prices = [float(item["price"]) for item in rows[:index + 1]]
+        exit_now = grams > 0 and held_days >= 5 and (prices[-1] < _sma(prices, 10) or macro_score <= -2 or held_days >= 15)
         model = Decision("HOLD", 0, "not called", "not_called")
         veto = False
         if entry_ok and cash > 0 and not exit_now and (grams == 0 or (held_days >= 3 and not added)) and use_deepseek:
             model = _model_veto(rows[:index + 1], in_position=grams > 0, tool_url=tool_url)
             model_calls += 1
-            veto = model.action == "SELL" and model.next_day_direction == "DOWN" and model.confidence >= 0.8 and model.direction_confidence >= 0.8
+            veto = (model.action == "SELL" and model.next_day_direction == "DOWN" and model.confidence >= 0.8 and model.direction_confidence >= 0.8) or (model.horizon_direction == "DOWN" and model.horizon_confidence >= 0.8)
         action = "HOLD"
         if exit_now:
             action = "SELL"
         elif entry_ok and not veto and grams == 0:
             action = "BUY_50"
-        elif entry_ok and not veto and grams > 0 and held_days >= 3 and not added:
+        elif entry_ok and not veto and grams > 0 and held_days >= 3 and not added and (not use_deepseek or (model.horizon_direction == "UP" and model.horizon_confidence >= 0.65 and model.technical_regime in {"breakout", "trend_continuation"})):
             action = "ADD_25"
         events.append({"signal_day": row["observed_on"], "fill_day": fill["observed_on"], "entry_ok": entry_ok,
                        "macro_score": macro_score, "held_days": held_days, "model_action": model.action,
@@ -86,7 +90,7 @@ def replay(rows: list[dict], *, start: date, end: date, tool_url: str, use_deeps
     first_index = next(i for i, row in enumerate(rows) if date.fromisoformat(row["observed_on"]) >= start)
     buy_hold = INITIAL_CASH / float(rows[first_index]["price"]) * float(rows[-1]["price"]) * (1 - SELL_FEE)
     return {"strategy": "swing_v1_trend_5_to_10_sessions", "target_period": {"start": start.isoformat(), "end": end.isoformat()},
-            "rule": {"entry": "price>SMA5>SMA20 and 20-session momentum>=3%; macro score>=0 when available", "sizing": "50% initial, one 25% add after 3 sessions", "exit": "after 5 sessions on trend failure/macro<=-2, mandatory exit by 10 sessions", "model": "DeepSeek may veto only a >=0.80 confidence DOWN/SELL warning", "fee": "buy 0%; sell 0.4%"},
+            "rule": {"entry": "trend continuation or >0.3% close above prior 20-session resistance; macro score>=0 when available", "sizing": "50% initial, one 25% add after 3 sessions only on DeepSeek 5-10-session UP continuation/breakout confirmation", "exit": "after 5 sessions on close below SMA10/macro<=-2, mandatory exit by 15 sessions", "model": "DeepSeek may veto a >=0.80 confidence downside warning and evaluates support/resistance, false-breakout and 5-10-session direction", "fee": "buy 0%; sell 0.4%"},
             "initial_cash": INITIAL_CASH, "final_value": round(final_value, 2), "return_percent": round((final_value / INITIAL_CASH - 1) * 100, 3),
             "buy_and_hold_return_percent": round((buy_hold / INITIAL_CASH - 1) * 100, 3), "trade_count": len(trades), "fees_paid": round(sum(t["fee"] for t in trades), 2), "model_calls": model_calls, "trades": trades, "events": events,
             "limitations": ["This is a separate development strategy, not a replacement for the frozen next-day experiment.", "Only a holdout period not used to shape this rule may support an out-of-sample claim."]}
