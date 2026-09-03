@@ -6,6 +6,7 @@ from demos.gold_factor_lab.history_chart import build_html
 from demos.gold_factor_lab.blind_replay import Decision, _daily_rows, _macro_context, anonymised_prompt, local_tool_decision, replay, third_prior_month
 from tools.deepseek_blind_gold_tool import invoke
 from demos.gold_factor_lab.factor_calibration import calibrate
+from demos.gold_factor_lab.evaluation_report import build_html as build_evaluation_html
 
 
 def test_jd_collector_marks_history_as_known_only_at_retrieval(monkeypatch):
@@ -172,3 +173,10 @@ def test_factor_calibration_marks_the_period_as_development_only():
     result = calibrate(rows, start=date(2026, 6, 21), end=date(2026, 6, 28))
     assert result["development_only"] is True
     assert "keep_macro_support_gate" in result["decision"]
+
+
+def test_evaluation_report_explains_flat_cash_is_not_profit():
+    result = {"prediction_metrics": {"directional_accuracy_percent": 43.42, "up_call_precision_percent": 43.14}, "decisions": [{"signal_day": "2026-08-01", "rule": "BUY", "executed": "HOLD", "next_day_direction": "UP", "actual_next_day_direction": "DOWN"}], "return_percent": 0, "final_value": 100000, "buy_and_hold_return_percent": -2.794, "buy_and_hold_final_value": 97206.14, "trade_count": 0, "fees_paid": 0, "trades": [], "frozen_rule": {"entry": "test"}}
+    page = build_evaluation_html(result, [{"observed_on": "2026-08-01", "value": 900}, {"observed_on": "2026-08-02", "value": 901}])
+    assert "不是盈利" in page
+    assert "京东浙商积存金价格" in page
