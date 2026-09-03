@@ -7,6 +7,7 @@ from demos.gold_factor_lab.blind_replay import Decision, _daily_rows, _macro_con
 from tools.deepseek_blind_gold_tool import invoke
 from demos.gold_factor_lab.factor_calibration import calibrate
 from demos.gold_factor_lab.evaluation_report import build_html as build_evaluation_html
+from demos.gold_factor_lab.swing_replay import replay as swing_replay
 
 
 def test_jd_collector_marks_history_as_known_only_at_retrieval(monkeypatch):
@@ -180,3 +181,11 @@ def test_evaluation_report_explains_flat_cash_is_not_profit():
     page = build_evaluation_html(result, [{"observed_on": "2026-08-01", "value": 900}, {"observed_on": "2026-08-02", "value": 901}])
     assert "不是盈利" in page
     assert "京东浙商积存金价格" in page
+
+
+def test_swing_replay_uses_partial_entry_and_sell_fee():
+    rows = [{"observed_on": f"2026-01-{day:02d}", "price": 100 + day, "usd_cny": 7.1, "broad_us_dollar": 100,
+             "us_10y_real_yield": 2, "wti_crude": 70} for day in range(1, 29)]
+    result = swing_replay(rows, start=date(2026, 1, 21), end=date(2026, 1, 27), tool_url="unused", use_deepseek=False)
+    assert any(item["action"] == "BUY_50" for item in result["trades"])
+    assert result["fees_paid"] >= 0
