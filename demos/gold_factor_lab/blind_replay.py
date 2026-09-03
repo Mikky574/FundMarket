@@ -197,11 +197,24 @@ def replay(rows: list[dict], *, trade_start: date, fee_rate: float = FEE_RATE,
 def main() -> None:
     parser = argparse.ArgumentParser(description="Blind, daily gold replay; writes an isolated research artifact.")
     parser.add_argument("--month", type=date.fromisoformat, help="Any date in the target month; default is three months prior.")
+    parser.add_argument("--start", type=date.fromisoformat, help="Explicit inclusive target start; must be paired with --end.")
+    parser.add_argument("--end", type=date.fromisoformat, help="Explicit inclusive target end; must be paired with --start.")
     parser.add_argument("--deepseek", action="store_true", help="Use the local project's DeepSeek research capability.")
     parser.add_argument("--tool-url", default="http://127.0.0.1:8000/api/v1/internal/research/gold-blind-decision")
     parser.add_argument("--output", type=Path, required=True, help="Ignored research-output path, e.g. data/gold_lab/evaluations/june.json")
     args = parser.parse_args()
-    start, end = (date(args.month.year, args.month.month, 1), date(args.month.year, args.month.month, monthrange(args.month.year, args.month.month)[1])) if args.month else third_prior_month(date.today())
+    if bool(args.start) != bool(args.end):
+        parser.error("--start and --end must be provided together")
+    if args.start and args.month:
+        parser.error("choose either --month or --start/--end")
+    if args.start:
+        start, end = args.start, args.end
+        if start > end:
+            parser.error("--start must not be after --end")
+    elif args.month:
+        start, end = date(args.month.year, args.month.month, 1), date(args.month.year, args.month.month, monthrange(args.month.year, args.month.month)[1])
+    else:
+        start, end = third_prior_month(date.today())
     panel = collect_factor_panel(start=start - timedelta(days=80), end=end)
     rows = _daily_rows(panel)
     provider = None
