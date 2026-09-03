@@ -35,6 +35,8 @@ class Decision:
     source: str
     next_day_direction: str = "FLAT"
     direction_confidence: float = 0.0
+    macro_score: int = 0
+    macro_available: int = 0
 
 
 def third_prior_month(reference: date) -> tuple[date, date]:
@@ -49,6 +51,33 @@ def _sma(values: list[float], period: int) -> float | None:
     return sum(values[-period:]) / period if len(values) >= period else None
 
 
+def _macro_context(history: list[dict]) -> tuple[int, int, bool, list[str]]:
+    """Score established gold drivers from prior-session values only."""
+    if len(history) < 6:
+        return 0, 0, False, []
+    current, prior = history[-1], history[-6]
+    score, available, labels = 0, 0, []
+    for name, unit, support_threshold, pressure_threshold, support_is_higher in (
+        ("usd_cny", "return", 0.001, -0.001, True),
+        ("broad_us_dollar", "return", -0.001, 0.001, False),
+        ("us_10y_real_yield", "level", -0.03, 0.03, False),
+    ):
+        if current.get(name) is None or prior.get(name) is None:
+            continue
+        available += 1
+        change = float(current[name]) - float(prior[name]) if unit == "level" else float(current[name]) / float(prior[name]) - 1
+        supports = change >= support_threshold if support_is_higher else change <= support_threshold
+        pressures = change <= pressure_threshold if support_is_higher else change >= pressure_threshold
+        if supports:
+            score += 1
+            labels.append(f"{name}:support")
+        elif pressures:
+            score -= 1
+            labels.append(f"{name}:pressure")
+    oil_risk = current.get("wti_crude") is not None and prior.get("wti_crude") is not None and abs(float(current["wti_crude"]) / float(prior["wti_crude"]) - 1) >= 0.05
+    return score, available, oil_risk, labels
+
+
 def rule_decision(history: list[dict], *, in_position: bool, held_days: int, cooldown_days: int) -> Decision:
     """A conservative, fee-aware trend rule with hysteresis.
 
@@ -61,13 +90,15 @@ def rule_decision(history: list[dict], *, in_position: bool, held_days: int, coo
     price, sma5, sma12 = prices[-1], _sma(prices, 5), _sma(prices, 12)
     momentum5 = price / prices[-6] - 1 if len(prices) >= 6 else 0.0
     drawdown10 = price / max(prices[-10:]) - 1
-    trend_up = price > sma5 > sma12 and momentum5 >= 0.012 and drawdown10 >= -0.007
-    trend_failed = (price < sma5 and momentum5 <= -0.008) or drawdown10 <= -0.016
+    macro_score, macro_available, oil_risk, labels = _macro_context(history)
+    macro_allows_entry = macro_available < 2 or macro_score >= 1
+    trend_up = price > sma5 > sma12 and momentum5 >= 0.012 and drawdown10 >= -0.007 and macro_allows_entry and not oil_risk
+    trend_failed = (price < sma5 and momentum5 <= -0.008) or drawdown10 <= -0.016 or (macro_available >= 2 and macro_score <= -2)
     if not in_position and cooldown_days == 0 and trend_up:
-        return Decision("BUY", 0.65, "price above 5/12-day averages with >1.2% five-day momentum", "rule", "UP", 0.65)
+        return Decision("BUY", 0.7, "price trend and macro drivers confirm entry: " + ", ".join(labels), "rule", "UP", 0.7, macro_score, macro_available)
     if in_position and held_days >= 3 and trend_failed:
-        return Decision("SELL", 0.75, "trend failure exceeds the fee-noise buffer", "rule", "DOWN", 0.75)
-    return Decision("HOLD", 0.4, "no fee-aware trend transition", "rule", "FLAT", 0.4)
+        return Decision("SELL", 0.75, "trend or macro context failed", "rule", "DOWN", 0.75, macro_score, macro_available)
+    return Decision("HOLD", 0.4, "no fee-aware trend and macro transition", "rule", "FLAT", 0.4, macro_score, macro_available)
 
 
 def anonymised_prompt(history: list[dict], *, in_position: bool, rule: Decision) -> str:
@@ -128,11 +159,12 @@ def _daily_rows(panel: dict[str, list[dict]]) -> list[dict]:
     output = []
     for gold in sorted(panel["jd_zheshang_gold"], key=lambda row: row["observed_on"]):
         day = gold["observed_on"]
+        # The free source has no verified US release timestamps. A gold row may
+        # therefore use factor values only from strictly earlier calendar days.
+        output.append({"observed_on": day, "price": float(gold["value"]), **latest})
         for name, values in factors.items():
             if day in values:
                 latest[name] = values[day]
-        price = float(gold["value"])
-        output.append({"observed_on": day, "price": price, **latest})
     for index, row in enumerate(output):
         row["return_1d"] = 0.0 if index == 0 else row["price"] / output[index - 1]["price"] - 1
     return output
@@ -154,12 +186,13 @@ def replay(rows: list[dict], *, trade_start: date, fee_rate: float = FEE_RATE,
         model = decision_provider(rows[:index + 1], grams > 0, rule)
         # The model may veto a rule entry or request a sufficiently confident
         # protective exit. An unsupported model BUY is never allowed.
-        action = "SELL" if rule.action == "SELL" or (grams > 0 and model.action == "SELL" and model.confidence >= 0.65 and model.next_day_direction == "DOWN") else ("BUY" if rule.action == "BUY" and model.action == "BUY" and model.confidence >= 0.55 and model.next_day_direction == "UP" else "HOLD")
+        action = "SELL" if rule.action == "SELL" or (grams > 0 and model.action == "SELL" and model.confidence >= 0.7 and model.next_day_direction == "DOWN" and model.direction_confidence >= 0.65) else ("BUY" if rule.action == "BUY" and model.action == "BUY" and model.confidence >= 0.7 and model.next_day_direction == "UP" and model.direction_confidence >= 0.65 else "HOLD")
         next_return = float(fill["price"]) / float(row["price"]) - 1
         actual_direction = "UP" if next_return > 0 else "DOWN" if next_return < 0 else "FLAT"
         decisions.append({"signal_day": row["observed_on"], "fill_day": fill["observed_on"], "rule": rule.action,
                           "model": model.action, "model_confidence": model.confidence,
                           "next_day_direction": model.next_day_direction, "direction_confidence": model.direction_confidence,
+                          "macro_score": rule.macro_score, "macro_available": rule.macro_available,
                           "actual_next_day_direction": actual_direction, "actual_next_day_return_percent": round(next_return * 100, 4), "executed": action})
         if action == "BUY" and cash > 0:
             notional, fee = cash, 0.0
@@ -186,7 +219,7 @@ def replay(rows: list[dict], *, trade_start: date, fee_rate: float = FEE_RATE,
     up_correct = [item for item in up_calls if item["actual_next_day_direction"] == "UP"]
     return {"contract": {"signal": "daily close", "execution": "next observed daily quote", "buy_fee_rate": 0.0, "sell_fee_rate": fee_rate,
                            "availability": "exploratory assumed daily-close availability; not verified vendor release time"},
-            "frozen_rule": {"entry": "price>SMA5>SMA12, 5-day momentum >=1.2%, 10-day drawdown >=-0.7%", "exit": "trend failure or 10-day drawdown <=-1.6%", "anti_churn": "minimum 3 holding days; 2-day post-sale cooldown", "selection": "set before the target month; no target-month parameter fitting"},
+            "frozen_rule": {"entry": "price>SMA5>SMA12, 5-day momentum >=1.2%, 10-day drawdown >=-0.7%, plus macro score >=1 when >=2 factors are available", "macro": "USD/CNY higher, real yield lower, broad dollar lower each add +1; inverse moves subtract 1; >=5% five-day oil move blocks entry", "model_gate": "BUY/UP requires action confidence >=0.70 and direction confidence >=0.65", "exit": "trend failure, 10-day drawdown <=-1.6%, or macro score <=-2", "anti_churn": "minimum 3 holding days; 2-day post-sale cooldown", "selection": "set before the next untouched validation period; no target-month parameter fitting"},
             "initial_cash": initial_cash, "final_value": round(final_value, 2), "return_percent": round((final_value / initial_cash - 1) * 100, 3),
             "buy_and_hold_final_value": round(buy_hold_value, 2), "buy_and_hold_return_percent": round((buy_hold_value / initial_cash - 1) * 100, 3),
             "fees_paid": round(sum(trade["fee"] for trade in trades), 2), "trade_count": len(trades),

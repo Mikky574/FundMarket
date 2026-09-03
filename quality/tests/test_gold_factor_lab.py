@@ -3,8 +3,9 @@ from datetime import date, datetime, timezone
 from demos.gold_factor_lab.analysis import describe
 from demos.gold_factor_lab import collector
 from demos.gold_factor_lab.history_chart import build_html
-from demos.gold_factor_lab.blind_replay import Decision, anonymised_prompt, local_tool_decision, replay, third_prior_month
+from demos.gold_factor_lab.blind_replay import Decision, _daily_rows, _macro_context, anonymised_prompt, local_tool_decision, replay, third_prior_month
 from tools.deepseek_blind_gold_tool import invoke
+from demos.gold_factor_lab.factor_calibration import calibrate
 
 
 def test_jd_collector_marks_history_as_known_only_at_retrieval(monkeypatch):
@@ -144,3 +145,30 @@ def test_sandbox_tool_only_accepts_the_blind_contract(monkeypatch):
         pass
     else:
         raise AssertionError("the tool accepted a non-blind field")
+
+
+def test_macro_context_uses_interpretable_factor_directions():
+    history = [{"price": 100, "usd_cny": 7.0, "broad_us_dollar": 100, "us_10y_real_yield": 2.0, "wti_crude": 70}] * 5
+    history.append({"price": 101, "usd_cny": 7.02, "broad_us_dollar": 99.5, "us_10y_real_yield": 1.95, "wti_crude": 71})
+    score, available, oil_risk, _labels = _macro_context(history)
+    assert (score, available, oil_risk) == (3, 3, False)
+
+
+def test_daily_factor_values_are_delayed_one_calendar_row():
+    rows = _daily_rows({
+        "jd_zheshang_gold": [{"observed_on": "2026-01-01", "value": 100}, {"observed_on": "2026-01-02", "value": 101}],
+        "usd_cny": [{"observed_on": "2026-01-01", "value": 7.1}],
+    })
+    assert rows[0]["usd_cny"] is None
+    assert rows[1]["usd_cny"] == 7.1
+
+
+def test_factor_calibration_marks_the_period_as_development_only():
+    rows = []
+    for day in range(1, 30):
+        rows.append({"observed_on": f"2026-06-{day:02d}", "price": 100 + day, "usd_cny": 7 + day / 1000,
+                     "broad_us_dollar": 100 - day / 100, "us_10y_real_yield": 2 - day / 100,
+                     "wti_crude": 70, "return_1d": 0})
+    result = calibrate(rows, start=date(2026, 6, 21), end=date(2026, 6, 28))
+    assert result["development_only"] is True
+    assert "keep_macro_support_gate" in result["decision"]
