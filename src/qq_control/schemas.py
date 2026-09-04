@@ -81,3 +81,4 @@ class BlindGoldDecisionRequest(BaseModel):
     position: str
     rule_candidate: str
     observations: list[dict] = Field(min_length=1, max_length=20)
+    analysis_mode: str = "technical_breakout"

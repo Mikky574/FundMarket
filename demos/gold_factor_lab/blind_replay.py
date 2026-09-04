@@ -152,11 +152,12 @@ def anonymised_prompt(history: list[dict], *, in_position: bool, rule: Decision)
     )
 
 
-def local_tool_decision(history: list[dict], *, in_position: bool, rule: Decision, tool_url: str) -> Decision:
+def local_tool_decision(history: list[dict], *, in_position: bool, rule: Decision, tool_url: str,
+                        analysis_mode: str = "technical_breakout") -> Decision:
     """Use the project's local DeepSeek capability; no credential enters this script."""
     payload = json.loads(anonymised_prompt(history, in_position=in_position, rule=rule).split("\n", 1)[1])
     response = httpx.post(tool_url, json={"position": payload["position"], "rule_candidate": rule.action,
-                                           "observations": payload["recent_observations"]}, timeout=60)
+                                           "observations": payload["recent_observations"], "analysis_mode": analysis_mode}, timeout=60)
     response.raise_for_status()
     data = response.json()
     action = str(data.get("action", "HOLD")).upper()

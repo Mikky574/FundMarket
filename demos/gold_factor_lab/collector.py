@@ -214,7 +214,10 @@ def collect_factor_panel(*, start: date, end: date, retrieved_at: datetime | Non
         raise ValueError("start must not be after end")
     received = retrieved_at or _now()
     days = (end - start).days
-    period_type = "m1" if days <= 31 else "m6" if days <= 183 else "y1"
+    # A short historical slice can still be older than the six-month endpoint.
+    # Select the vendor range from both requested duration and its start date.
+    six_month_cutoff = date.today() - timedelta(days=183)
+    period_type = "y1" if start < six_month_cutoff or days > 183 else "m1" if days <= 31 else "m6"
     jd_rows = [row for row in collect_jd_history(period_type=period_type, retrieved_at=received)
                if start.isoformat() <= row["observed_on"] <= end.isoformat()]
     if not jd_rows:

@@ -36,9 +36,22 @@ def _trend_entry(history: list[dict]) -> tuple[bool, int]:
     return (continuation or confirmed_breakout) and macro_ok and not oil_risk, macro_score
 
 
-def _model_veto(history: list[dict], *, in_position: bool, tool_url: str) -> Decision:
+def _model_panel(history: list[dict], *, in_position: bool, tool_url: str) -> dict[str, Decision]:
+    """Obtain independent technical, macro and skeptical analyses per candidate."""
     neutral_rule = Decision("HOLD", 0.0, "trend regime handles entry", "swing_rule", "FLAT", 0.0)
-    return local_tool_decision(history, in_position=in_position, rule=neutral_rule, tool_url=tool_url)
+    return {mode: local_tool_decision(history, in_position=in_position, rule=neutral_rule, tool_url=tool_url, analysis_mode=mode)
+            for mode in ("technical_breakout", "macro_regime", "risk_skeptic")}
+
+
+def _panel_allows_entry(panel: dict[str, Decision]) -> tuple[bool, bool]:
+    """Require support from technical and macro roles; honour skeptical evidence."""
+    technical, macro, skeptic = panel["technical_breakout"], panel["macro_regime"], panel["risk_skeptic"]
+    support = (technical.horizon_direction == "UP" and technical.horizon_confidence >= 0.6 and
+               macro.horizon_direction != "DOWN" and macro.horizon_confidence >= 0.55)
+    skeptic_blocks = ((skeptic.action == "SELL" and skeptic.confidence >= 0.55) or
+                      (skeptic.horizon_direction == "DOWN" and skeptic.horizon_confidence >= 0.55) or
+                      (skeptic.technical_regime in {"near_resistance", "breakdown"} and skeptic.action != "BUY"))
+    return support and not skeptic_blocks, skeptic_blocks
 
 
 def replay(rows: list[dict], *, start: date, end: date, tool_url: str, use_deepseek: bool = True) -> dict:
@@ -52,22 +65,29 @@ def replay(rows: list[dict], *, start: date, end: date, tool_url: str, use_deeps
         entry_ok, macro_score = _trend_entry(rows[:index + 1])
         prices = [float(item["price"]) for item in rows[:index + 1]]
         exit_now = grams > 0 and held_days >= 5 and (prices[-1] < _sma(prices, 10) or macro_score <= -2 or held_days >= 15)
+        panel: dict[str, Decision] = {}
         model = Decision("HOLD", 0, "not called", "not_called")
         veto = False
         if entry_ok and cash > 0 and not exit_now and (grams == 0 or (held_days >= 3 and not added)) and use_deepseek:
-            model = _model_veto(rows[:index + 1], in_position=grams > 0, tool_url=tool_url)
-            model_calls += 1
-            veto = (model.action == "SELL" and model.next_day_direction == "DOWN" and model.confidence >= 0.8 and model.direction_confidence >= 0.8) or (model.horizon_direction == "DOWN" and model.horizon_confidence >= 0.8)
+            panel = _model_panel(rows[:index + 1], in_position=grams > 0, tool_url=tool_url)
+            model = panel["technical_breakout"]
+            model_calls += len(panel)
+            macro = panel["macro_regime"]
+            allowed_by_panel, veto = _panel_allows_entry(panel)
         action = "HOLD"
         if exit_now:
             action = "SELL"
-        elif entry_ok and not veto and grams == 0:
+        elif entry_ok and not veto and (not use_deepseek or allowed_by_panel) and grams == 0:
             action = "BUY_50"
-        elif entry_ok and not veto and grams > 0 and held_days >= 3 and not added and (not use_deepseek or (model.horizon_direction == "UP" and model.horizon_confidence >= 0.65 and model.technical_regime in {"breakout", "trend_continuation"})):
+        elif entry_ok and not veto and grams > 0 and held_days >= 3 and not added and (not use_deepseek or (allowed_by_panel and model.technical_regime in {"breakout", "trend_continuation"} and macro.horizon_direction != "DOWN")):
             action = "ADD_25"
+        analyses = {role: {"action": item.action, "confidence": item.confidence,
+                            "next_day_direction": item.next_day_direction, "horizon_5_10_direction": item.horizon_direction,
+                            "horizon_confidence": item.horizon_confidence, "technical_regime": item.technical_regime,
+                            "reason": item.reason} for role, item in panel.items()}
         events.append({"signal_day": row["observed_on"], "fill_day": fill["observed_on"], "entry_ok": entry_ok,
                        "macro_score": macro_score, "held_days": held_days, "model_action": model.action,
-                       "model_direction": model.next_day_direction, "model_veto": veto, "executed": action})
+                       "model_direction": model.next_day_direction, "model_veto": veto, "analyses": analyses, "executed": action})
         price = float(fill["price"])
         if action in {"BUY_50", "ADD_25"}:
             amount = cash * 0.5 if action == "BUY_50" else min(cash, INITIAL_CASH * 0.25)
@@ -90,7 +110,7 @@ def replay(rows: list[dict], *, start: date, end: date, tool_url: str, use_deeps
     first_index = next(i for i, row in enumerate(rows) if date.fromisoformat(row["observed_on"]) >= start)
     buy_hold = INITIAL_CASH / float(rows[first_index]["price"]) * float(rows[-1]["price"]) * (1 - SELL_FEE)
     return {"strategy": "swing_v1_trend_5_to_10_sessions", "target_period": {"start": start.isoformat(), "end": end.isoformat()},
-            "rule": {"entry": "trend continuation or >0.3% close above prior 20-session resistance; macro score>=0 when available", "sizing": "50% initial, one 25% add after 3 sessions only on DeepSeek 5-10-session UP continuation/breakout confirmation", "exit": "after 5 sessions on close below SMA10/macro<=-2, mandatory exit by 15 sessions", "model": "DeepSeek may veto a >=0.80 confidence downside warning and evaluates support/resistance, false-breakout and 5-10-session direction", "fee": "buy 0%; sell 0.4%"},
+            "rule": {"entry": "trend continuation or >0.3% close above prior 20-session resistance; macro score>=0 when available", "sizing": "50% initial, one 25% add after 3 sessions only after three-role consensus", "exit": "after 5 sessions on close below SMA10/macro<=-2, mandatory exit by 15 sessions", "model": "technical role needs 5-10 session UP >=0.60; macro cannot be DOWN; skeptic blocks SELL/DOWN >=0.55 or unconfirmed near-resistance/breakdown", "fee": "buy 0%; sell 0.4%"},
             "initial_cash": INITIAL_CASH, "final_value": round(final_value, 2), "return_percent": round((final_value / INITIAL_CASH - 1) * 100, 3),
             "buy_and_hold_return_percent": round((buy_hold / INITIAL_CASH - 1) * 100, 3), "trade_count": len(trades), "fees_paid": round(sum(t["fee"] for t in trades), 2), "model_calls": model_calls, "trades": trades, "events": events,
             "limitations": ["This is a separate development strategy, not a replacement for the frozen next-day experiment.", "Only a holdout period not used to shape this rule may support an out-of-sample claim."]}

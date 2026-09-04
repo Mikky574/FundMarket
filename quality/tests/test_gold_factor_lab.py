@@ -43,6 +43,20 @@ def test_jd_history_accepts_six_month_period(monkeypatch):
     assert rows[0]["observed_on"] == "2026-06-03"
 
 
+def test_factor_panel_uses_one_year_source_for_an_old_short_window(monkeypatch):
+    observed = {}
+    def history(*, period_type, **_kwargs):
+        observed["period"] = period_type
+        return []
+    monkeypatch.setattr(collector, "collect_jd_history", history)
+    monkeypatch.setattr(collector, "collect_fred_factor", lambda *_args, **_kwargs: [{"observed_on": "2025-10-01", "value": 1}])
+    try:
+        collector.collect_factor_panel(start=date(2025, 10, 1), end=date(2025, 12, 31))
+    except collector.CollectionError:
+        pass
+    assert observed["period"] == "y1"
+
+
 def test_jd_intraday_collector_preserves_source_timestamp(monkeypatch):
     class Response:
         def raise_for_status(self): pass

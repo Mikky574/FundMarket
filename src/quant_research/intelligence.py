@@ -354,12 +354,20 @@ def analyse(quant: dict, news: list[dict]) -> dict:
     return result
 
 
-def analyse_blind_gold(observations: list[dict], position: str, rule_candidate: str) -> dict:
+def analyse_blind_gold(observations: list[dict], position: str, rule_candidate: str,
+                       analysis_mode: str = "technical_breakout") -> dict:
     """Classify an anonymised replay window without persisting it or creating orders."""
     if not 1 <= len(observations) <= 20:
         raise ValueError("blind gold observations must contain 1..20 rows")
     if position not in {"cash", "long_gold"} or rule_candidate not in {"BUY", "SELL", "HOLD"}:
         raise ValueError("invalid blind gold state")
+    role_instructions = {
+        "technical_breakout": "Act as a technical-market analyst. Assess trend continuation, confirmed breakout above prior resistance, false-breakout risk, support failure, and the 5-10 session direction.",
+        "macro_regime": "Act as a gold macro analyst. Assess whether USD/CNY, broad dollar, real yields and oil regime support or conflict with a 5-10 session gold move. Treat technical indicators as context, not proof.",
+        "risk_skeptic": "Act as an independent risk skeptic. Seek falsifying evidence: resistance rejection, failed breakout, weakening momentum, macro conflict, and downside asymmetry. Prefer FLAT when evidence is insufficient.",
+    }
+    if analysis_mode not in role_instructions:
+        raise ValueError("invalid blind gold analysis mode")
     allowed = {"day", "gold_cny_per_gram", "gold_return_1d_pct", "usd_cny", "broad_us_dollar",
                "us_10y_real_yield", "us_10y_nominal_yield", "wti_crude", "sma5", "sma20",
                "momentum5_pct", "momentum20_pct", "distance_to_resistance20_pct", "distance_to_support20_pct"}
@@ -370,9 +378,8 @@ def analyse_blind_gold(observations: list[dict], position: str, rule_candidate: 
         raise RuntimeError("DeepSeek API key is not configured")
     evidence = {"experiment": "daily historical blind replay", "calendar_dates": "intentionally omitted",
                 "execution": "decision fills at next observed daily quote; buy fee 0%, sell fee 0.4%",
-                "position": position, "rule_candidate": rule_candidate, "recent_observations": observations}
-    prompt = ("You are a constrained research classifier, not an investment adviser. Do not infer dates or request future data. "
-              "Assess trend continuation, a confirmed breakout above prior 20-session resistance, false-breakout risk, support failure, and whether macro context conflicts. "
+                "position": position, "rule_candidate": rule_candidate, "analysis_mode": analysis_mode, "recent_observations": observations}
+    prompt = ("You are a constrained research classifier, not an investment adviser. Do not infer dates or request future data. " + role_instructions[analysis_mode] + " "
               "Return only {\"next_day_direction\":\"UP|DOWN|FLAT\",\"direction_confidence\":0..1,\"horizon_5_10_direction\":\"UP|DOWN|FLAT\",\"horizon_confidence\":0..1,\"technical_regime\":\"breakout|trend_continuation|near_resistance|near_support|range|breakdown|uncertain\",\"action\":\"BUY|SELL|HOLD\",\"confidence\":0..1,\"reason\":\"under 160 chars\"}. "
               "BUY means move from cash to gold; SELL means move from gold to cash. Use only this sequential evidence:\n" +
               json.dumps(evidence, ensure_ascii=False, separators=(",", ":")))
@@ -406,7 +413,7 @@ def analyse_blind_gold(observations: list[dict], position: str, rule_candidate: 
         horizon_confidence = 0.0
     regime = str(data.get("technical_regime", "unknown"))[:40]
     return {"action": action, "confidence": confidence, "next_day_direction": direction, "direction_confidence": direction_confidence, "horizon_5_10_direction": horizon_direction, "horizon_confidence": horizon_confidence, "technical_regime": regime, "reason": str(data.get("reason", "no reason"))[:160],
-            "model": "deepseek-v4-flash", "research_only": True}
+            "analysis_mode": analysis_mode, "model": "deepseek-v4-flash", "research_only": True}
 
 
 def refresh_intelligence(quant: dict | None = None) -> dict:
