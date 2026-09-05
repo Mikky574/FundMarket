@@ -15,13 +15,13 @@ import httpx
 
 DEFAULT_URL = "http://127.0.0.1:8000/api/v1/internal/research/gold-blind-decision"
 REQUIRED_TOP_LEVEL = {"position", "rule_candidate", "observations"}
-ALLOWED_TOP_LEVEL = REQUIRED_TOP_LEVEL | {"analysis_mode"}
+ALLOWED_TOP_LEVEL = REQUIRED_TOP_LEVEL | {"analysis_mode", "analysis_context"}
 
 
 def invoke(payload: dict, *, url: str = DEFAULT_URL) -> dict:
     """Validate the narrow contract, then invoke the local capability."""
     if not isinstance(payload, dict) or not REQUIRED_TOP_LEVEL <= set(payload) or set(payload) - ALLOWED_TOP_LEVEL:
-        raise ValueError("payload must contain position, rule_candidate, observations and optional analysis_mode")
+        raise ValueError("payload must contain position, rule_candidate, observations and optional analysis_mode/analysis_context")
     response = httpx.post(url, json=payload, timeout=75)
     response.raise_for_status()
     result = response.json()

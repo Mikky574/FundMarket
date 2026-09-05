@@ -106,13 +106,20 @@ def replay(rows: list[dict], *, start: date, end: date, tool_url: str, use_deeps
             held_days, added = 0, False
         elif grams > 0:
             held_days += 1
-    final_value = cash + grams * float(rows[-1]["price"])
+    # Use a net-liquidation valuation for an open position.  This does not
+    # invent a final execution; it accrues the same sell fee already charged
+    # to the buy-and-hold benchmark, so the comparison is fair.
+    mark_to_market_value = cash + grams * float(rows[-1]["price"])
+    terminal_exit_fee = grams * float(rows[-1]["price"]) * SELL_FEE if grams else 0.0
+    final_value = mark_to_market_value - terminal_exit_fee
     first_index = next(i for i, row in enumerate(rows) if date.fromisoformat(row["observed_on"]) >= start)
     buy_hold = INITIAL_CASH / float(rows[first_index]["price"]) * float(rows[-1]["price"]) * (1 - SELL_FEE)
     return {"strategy": "swing_v1_trend_5_to_10_sessions", "target_period": {"start": start.isoformat(), "end": end.isoformat()},
             "rule": {"entry": "trend continuation or >0.3% close above prior 20-session resistance; macro score>=0 when available", "sizing": "50% initial, one 25% add after 3 sessions only after three-role consensus", "exit": "after 5 sessions on close below SMA10/macro<=-2, mandatory exit by 15 sessions", "model": "technical role needs 5-10 session UP >=0.60; macro cannot be DOWN; skeptic blocks SELL/DOWN >=0.55 or unconfirmed near-resistance/breakdown", "fee": "buy 0%; sell 0.4%"},
-            "initial_cash": INITIAL_CASH, "final_value": round(final_value, 2), "return_percent": round((final_value / INITIAL_CASH - 1) * 100, 3),
-            "buy_and_hold_return_percent": round((buy_hold / INITIAL_CASH - 1) * 100, 3), "trade_count": len(trades), "fees_paid": round(sum(t["fee"] for t in trades), 2), "model_calls": model_calls, "trades": trades, "events": events,
+            "initial_cash": INITIAL_CASH, "final_value": round(final_value, 2), "mark_to_market_value": round(mark_to_market_value, 2),
+            "terminal_exit_fee": round(terminal_exit_fee, 2), "open_grams": round(grams, 8), "return_percent": round((final_value / INITIAL_CASH - 1) * 100, 3),
+            "buy_and_hold_return_percent": round((buy_hold / INITIAL_CASH - 1) * 100, 3), "trade_count": len(trades), "realized_fees_paid": round(sum(t["fee"] for t in trades), 2),
+            "fees_paid": round(sum(t["fee"] for t in trades) + terminal_exit_fee, 2), "model_calls": model_calls, "trades": trades, "events": events,
             "limitations": ["This is a separate development strategy, not a replacement for the frozen next-day experiment.", "Only a holdout period not used to shape this rule may support an out-of-sample claim."]}
 
 

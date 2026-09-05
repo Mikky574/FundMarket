@@ -40,6 +40,14 @@ class Decision:
     horizon_direction: str = "FLAT"
     horizon_confidence: float = 0.0
     technical_regime: str = "unknown"
+    stance: str = "NEUTRAL"
+    probability_net_gain_over_fee: float = 0.0
+    probability_material_loss: float = 0.0
+    expected_net_return_bucket: str = "minus_0.4_to_0.4"
+    risk_severity: str = "material"
+    reason_codes: tuple[str, ...] = ()
+    invalidation_codes: tuple[str, ...] = ()
+    evidence: tuple[dict, ...] = ()
 
 
 def third_prior_month(reference: date) -> tuple[date, date]:
@@ -152,28 +160,57 @@ def anonymised_prompt(history: list[dict], *, in_position: bool, rule: Decision)
     )
 
 
+def _probability(value: object) -> float:
+    try:
+        return min(1.0, max(0.0, float(value)))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _code_tuple(value: object) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        return ()
+    return tuple(str(item)[:48] for item in value[:6] if isinstance(item, str))
+
+
 def local_tool_decision(history: list[dict], *, in_position: bool, rule: Decision, tool_url: str,
-                        analysis_mode: str = "technical_breakout") -> Decision:
+                        analysis_mode: str = "technical_breakout", analysis_context: dict | None = None,
+                        observations: list[dict] | None = None) -> Decision:
     """Use the project's local DeepSeek capability; no credential enters this script."""
-    payload = json.loads(anonymised_prompt(history, in_position=in_position, rule=rule).split("\n", 1)[1])
-    response = httpx.post(tool_url, json={"position": payload["position"], "rule_candidate": rule.action,
-                                           "observations": payload["recent_observations"], "analysis_mode": analysis_mode}, timeout=60)
+    if observations is None:
+        payload = json.loads(anonymised_prompt(history, in_position=in_position, rule=rule).split("\n", 1)[1])
+        observations = payload["recent_observations"]
+    request = {"position": "long_gold" if in_position else "cash", "rule_candidate": rule.action,
+               "observations": observations, "analysis_mode": analysis_mode}
+    if analysis_context is not None:
+        request["analysis_context"] = analysis_context
+    response = httpx.post(tool_url, json=request, timeout=60)
     response.raise_for_status()
     data = response.json()
     action = str(data.get("action", "HOLD")).upper()
     if action not in {"BUY", "SELL", "HOLD"}:
         action = "HOLD"
-    confidence = min(1.0, max(0.0, float(data.get("confidence", 0))))
+    confidence = _probability(data.get("confidence"))
     direction = str(data.get("next_day_direction", "FLAT")).upper()
     if direction not in {"UP", "DOWN", "FLAT"}:
         direction = "FLAT"
-    direction_confidence = min(1.0, max(0.0, float(data.get("direction_confidence", 0))))
+    direction_confidence = _probability(data.get("direction_confidence"))
     horizon_direction = str(data.get("horizon_5_10_direction", "FLAT")).upper()
     if horizon_direction not in {"UP", "DOWN", "FLAT"}:
         horizon_direction = "FLAT"
-    horizon_confidence = min(1.0, max(0.0, float(data.get("horizon_confidence", 0))))
+    horizon_confidence = _probability(data.get("horizon_confidence"))
     regime = str(data.get("technical_regime", "unknown"))[:40]
-    return Decision(action, confidence, str(data.get("reason", "no reason"))[:160], "deepseek_tool", direction, direction_confidence, 0, 0, horizon_direction, horizon_confidence, regime)
+    risk_severity = str(data.get("risk_severity", "material")).lower()
+    if risk_severity not in {"none", "mild", "material", "hard_block"}:
+        risk_severity = "material"
+    stance = str(data.get("stance", "NEUTRAL")).upper()
+    if stance not in {"BULLISH", "NEUTRAL", "BEARISH"}:
+        stance = "NEUTRAL"
+    evidence = tuple(item for item in data.get("evidence", [])[:4] if isinstance(item, dict)) if isinstance(data.get("evidence"), list) else ()
+    return Decision(action, confidence, str(data.get("reason", "no reason"))[:160], "deepseek_tool", direction, direction_confidence, 0, 0, horizon_direction, horizon_confidence, regime,
+                    stance, _probability(data.get("probability_net_gain_over_fee")), _probability(data.get("probability_material_loss")),
+                    str(data.get("expected_net_return_bucket", "minus_0.4_to_0.4"))[:40], risk_severity,
+                    _code_tuple(data.get("reason_codes")), _code_tuple(data.get("invalidation_codes")), evidence)
 
 
 def _daily_rows(panel: dict[str, list[dict]]) -> list[dict]:

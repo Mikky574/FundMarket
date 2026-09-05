@@ -6,6 +6,7 @@ decision operation.  Its output is dated research evidence, not an instruction.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
@@ -17,6 +18,7 @@ from urllib.request import Request, urlopen
 import httpx
 
 from src.config import settings
+from src.quant_research.contracts import BlindGoldAnalysisContext
 from src.quant_research.fund_data import get_fund_overview
 from src.quant_research.fund_signals import fund_research_card
 from src.quant_research.providers.akshare_provider import AkShareProvider
@@ -354,8 +356,55 @@ def analyse(quant: dict, news: list[dict]) -> dict:
     return result
 
 
+def _bounded_probability(value: object) -> float:
+    """Normalise an optional model probability without failing the capability."""
+    try:
+        return min(1.0, max(0.0, float(value)))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _enum(value: object, allowed: set[str], default: str) -> str:
+    candidate = str(value or default).upper()
+    return candidate if candidate in allowed else default
+
+
+def _reason_codes(value: object, *, limit: int = 6) -> list[str]:
+    """Keep model reason codes small, machine-readable and safe for auditing."""
+    if not isinstance(value, list):
+        return []
+    codes = []
+    for item in value:
+        code = re.sub(r"[^A-Z0-9_]", "", str(item).upper())[:48]
+        if code and code not in codes:
+            codes.append(code)
+        if len(codes) >= limit:
+            break
+    return codes
+
+
+def _evidence_items(value: object) -> list[dict]:
+    """Normalise a compact, feature-only evidence list from the model."""
+    if not isinstance(value, list):
+        return []
+    result = []
+    for item in value[:4]:
+        if not isinstance(item, dict):
+            continue
+        feature = re.sub(r"[^A-Z0-9_]", "", str(item.get("feature", "")).upper())[:48]
+        effect = _enum(item.get("effect"), {"SUPPORT", "PRESSURE", "UNKNOWN"}, "UNKNOWN").lower()
+        try:
+            strength = min(2, max(-2, int(item.get("strength", 0))))
+        except (TypeError, ValueError):
+            strength = 0
+        if feature:
+            result.append({"feature": feature, "effect": effect, "strength": strength})
+    return result
+
+
 def analyse_blind_gold(observations: list[dict], position: str, rule_candidate: str,
-                       analysis_mode: str = "technical_breakout") -> dict:
+                       analysis_mode: str = "technical_breakout",
+                       analysis_context: BlindGoldAnalysisContext | dict | None = None) -> dict:
     """Classify an anonymised replay window without persisting it or creating orders."""
     if not 1 <= len(observations) <= 20:
         raise ValueError("blind gold observations must contain 1..20 rows")
@@ -364,55 +413,56 @@ def analyse_blind_gold(observations: list[dict], position: str, rule_candidate: 
     role_instructions = {
         "technical_breakout": "Act as a technical-market analyst. Assess trend continuation, confirmed breakout above prior resistance, false-breakout risk, support failure, and the 5-10 session direction.",
         "macro_regime": "Act as a gold macro analyst. Assess whether USD/CNY, broad dollar, real yields and oil regime support or conflict with a 5-10 session gold move. Treat technical indicators as context, not proof.",
-        "risk_skeptic": "Act as an independent risk skeptic. Seek falsifying evidence: resistance rejection, failed breakout, weakening momentum, macro conflict, and downside asymmetry. Prefer FLAT when evidence is insufficient.",
+        "trade_quality": "Act as a trade-odds analyst. Assess 5-10 session fee-adjusted upside, downside, and whether expected movement can plausibly clear the stated sell fee. Do not create a trade signal; rate the setup quality only.",
+        "risk_skeptic": "Act as an independent risk skeptic. Seek falsifying evidence: resistance rejection, failed breakout, weakening momentum, macro conflict, and downside asymmetry. Classify risk severity; do not use ordinary uncertainty as a hard block.",
     }
     if analysis_mode not in role_instructions:
         raise ValueError("invalid blind gold analysis mode")
     allowed = {"day", "gold_cny_per_gram", "gold_return_1d_pct", "usd_cny", "broad_us_dollar",
                "us_10y_real_yield", "us_10y_nominal_yield", "wti_crude", "sma5", "sma20",
-               "momentum5_pct", "momentum20_pct", "distance_to_resistance20_pct", "distance_to_support20_pct"}
+               "momentum5_pct", "momentum20_pct", "distance_to_resistance20_pct", "distance_to_support20_pct",
+               "gold_index_base100"}
     if any(not isinstance(item, dict) or set(item) - allowed or "day" not in item for item in observations):
         raise ValueError("blind gold rows contain unsupported fields")
+    if analysis_context is not None and not isinstance(analysis_context, BlindGoldAnalysisContext):
+        analysis_context = BlindGoldAnalysisContext.model_validate(analysis_context)
+    context_payload = analysis_context.model_dump(exclude_none=True) if analysis_context else None
     key = _read_key()
     if not key:
         raise RuntimeError("DeepSeek API key is not configured")
     evidence = {"experiment": "daily historical blind replay", "calendar_dates": "intentionally omitted",
                 "execution": "decision fills at next observed daily quote; buy fee 0%, sell fee 0.4%",
-                "position": position, "rule_candidate": rule_candidate, "analysis_mode": analysis_mode, "recent_observations": observations}
+                "position": position, "rule_candidate": rule_candidate, "analysis_mode": analysis_mode,
+                "recent_observations": observations, "analysis_context": context_payload}
     prompt = ("You are a constrained research classifier, not an investment adviser. Do not infer dates or request future data. " + role_instructions[analysis_mode] + " "
-              "Return only {\"next_day_direction\":\"UP|DOWN|FLAT\",\"direction_confidence\":0..1,\"horizon_5_10_direction\":\"UP|DOWN|FLAT\",\"horizon_confidence\":0..1,\"technical_regime\":\"breakout|trend_continuation|near_resistance|near_support|range|breakdown|uncertain\",\"action\":\"BUY|SELL|HOLD\",\"confidence\":0..1,\"reason\":\"under 160 chars\"}. "
-              "BUY means move from cash to gold; SELL means move from gold to cash. Use only this sequential evidence:\n" +
+              "Return only {\"next_day_direction\":\"UP|DOWN|FLAT\",\"direction_confidence\":0..1,\"horizon_5_10_direction\":\"UP|DOWN|FLAT\",\"horizon_confidence\":0..1,\"technical_regime\":\"breakout|trend_continuation|near_resistance|near_support|range|breakdown|uncertain\",\"action\":\"BUY|SELL|HOLD\",\"confidence\":0..1,\"stance\":\"BULLISH|NEUTRAL|BEARISH\",\"probability_net_gain_over_fee\":0..1,\"probability_material_loss\":0..1,\"expected_net_return_bucket\":\"above_1.2|0.4_to_1.2|minus_0.4_to_0.4|below_minus_0.4\",\"risk_severity\":\"none|mild|material|hard_block\",\"reason_codes\":[\"UPPERCASE_CODE\"],\"invalidation_codes\":[\"UPPERCASE_CODE\"],\"evidence\":[{\"feature\":\"FEATURE_CODE\",\"effect\":\"support|pressure|unknown\",\"strength\":-2..2}],\"reason\":\"under 160 chars\"}. "
+              "The legacy action is descriptive only; the deterministic replay owns execution. A bullish view is not automatically fee-covering or tradable. Use only this sequential feature evidence:\n" +
               json.dumps(evidence, ensure_ascii=False, separators=(",", ":")))
     response = httpx.post("https://api.deepseek.com/chat/completions", headers={"Authorization": f"Bearer {key}"},
                           json={"model": "deepseek-v4-flash", "thinking": {"type": "disabled"}, "temperature": 0,
-                                "response_format": {"type": "json_object"}, "max_tokens": 180,
+                                "response_format": {"type": "json_object"}, "max_tokens": 360,
                                 "messages": [{"role": "system", "content": "Return valid JSON only."}, {"role": "user", "content": prompt}]},
                           timeout=settings.market_intelligence_http_timeout_seconds)
     response.raise_for_status()
     data = json.loads(response.json()["choices"][0]["message"].get("content") or "{}")
-    action = str(data.get("action", "HOLD")).upper()
-    if action not in {"BUY", "SELL", "HOLD"}:
-        action = "HOLD"
-    try:
-        confidence = min(1.0, max(0.0, float(data.get("confidence", 0))))
-    except (TypeError, ValueError):
-        confidence = 0.0
-    direction = str(data.get("next_day_direction", "FLAT")).upper()
-    if direction not in {"UP", "DOWN", "FLAT"}:
-        direction = "FLAT"
-    try:
-        direction_confidence = min(1.0, max(0.0, float(data.get("direction_confidence", 0))))
-    except (TypeError, ValueError):
-        direction_confidence = 0.0
-    horizon_direction = str(data.get("horizon_5_10_direction", "FLAT")).upper()
-    if horizon_direction not in {"UP", "DOWN", "FLAT"}:
-        horizon_direction = "FLAT"
-    try:
-        horizon_confidence = min(1.0, max(0.0, float(data.get("horizon_confidence", 0))))
-    except (TypeError, ValueError):
-        horizon_confidence = 0.0
+    if not isinstance(data, dict):
+        data = {}
+    action = _enum(data.get("action"), {"BUY", "SELL", "HOLD"}, "HOLD")
+    confidence = _bounded_probability(data.get("confidence"))
+    direction = _enum(data.get("next_day_direction"), {"UP", "DOWN", "FLAT"}, "FLAT")
+    direction_confidence = _bounded_probability(data.get("direction_confidence"))
+    horizon_direction = _enum(data.get("horizon_5_10_direction"), {"UP", "DOWN", "FLAT"}, "FLAT")
+    horizon_confidence = _bounded_probability(data.get("horizon_confidence"))
     regime = str(data.get("technical_regime", "unknown"))[:40]
+    stance = _enum(data.get("stance"), {"BULLISH", "NEUTRAL", "BEARISH"}, "NEUTRAL")
+    expected_bucket = _enum(data.get("expected_net_return_bucket"), {"ABOVE_1.2", "0.4_TO_1.2", "MINUS_0.4_TO_0.4", "BELOW_MINUS_0.4"}, "MINUS_0.4_TO_0.4").lower()
+    risk_severity = _enum(data.get("risk_severity"), {"NONE", "MILD", "MATERIAL", "HARD_BLOCK"}, "MATERIAL").lower()
     return {"action": action, "confidence": confidence, "next_day_direction": direction, "direction_confidence": direction_confidence, "horizon_5_10_direction": horizon_direction, "horizon_confidence": horizon_confidence, "technical_regime": regime, "reason": str(data.get("reason", "no reason"))[:160],
+            "stance": stance, "probability_net_gain_over_fee": _bounded_probability(data.get("probability_net_gain_over_fee")),
+            "probability_material_loss": _bounded_probability(data.get("probability_material_loss")),
+            "expected_net_return_bucket": expected_bucket, "risk_severity": risk_severity,
+            "reason_codes": _reason_codes(data.get("reason_codes")), "invalidation_codes": _reason_codes(data.get("invalidation_codes")),
+            "evidence": _evidence_items(data.get("evidence")),
             "analysis_mode": analysis_mode, "model": "deepseek-v4-flash", "research_only": True}
 
 

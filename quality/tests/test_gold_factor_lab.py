@@ -1,4 +1,4 @@
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from demos.gold_factor_lab.analysis import describe
 from demos.gold_factor_lab import collector
@@ -8,6 +8,9 @@ from tools.deepseek_blind_gold_tool import invoke
 from demos.gold_factor_lab.factor_calibration import calibrate
 from demos.gold_factor_lab.evaluation_report import build_html as build_evaluation_html
 from demos.gold_factor_lab.swing_replay import replay as swing_replay
+from demos.gold_factor_lab.swing_v3 import _standardised_observations, features as swing_v3_features, replay as swing_v3_replay
+from src.quant_research.contracts import BlindGoldAnalysisContext
+from src.quant_research.intelligence import analyse_blind_gold
 
 
 def test_jd_collector_marks_history_as_known_only_at_retrieval(monkeypatch):
@@ -202,4 +205,66 @@ def test_swing_replay_uses_partial_entry_and_sell_fee():
              "us_10y_real_yield": 2, "wti_crude": 70} for day in range(1, 29)]
     result = swing_replay(rows, start=date(2026, 1, 21), end=date(2026, 1, 27), tool_url="unused", use_deepseek=False)
     assert any(item["action"] == "BUY_50" for item in result["trades"])
-    assert result["fees_paid"] >= 0
+    assert result["terminal_exit_fee"] > 0
+    assert result["final_value"] == round(result["mark_to_market_value"] - result["terminal_exit_fee"], 2)
+    assert result["fees_paid"] >= result["terminal_exit_fee"]
+
+
+def _v3_rows(prices: list[float]) -> list[dict]:
+    first_day = date(2026, 1, 1)
+    return [
+        {
+            "observed_on": (first_day + timedelta(days=index)).isoformat(),
+            "price": price,
+            "return_1d": 0.0 if index == 0 else price / prices[index - 1] - 1,
+        }
+        for index, price in enumerate(prices)
+    ]
+
+
+def test_swing_v3_accrues_terminal_sell_fee_and_uses_next_quote():
+    rows = _v3_rows([100 * 1.002 ** index for index in range(70)])
+    result = swing_v3_replay(rows, start=date(2026, 3, 2), end=date(2026, 3, 9), tool_url="unused", use_deepseek=False)
+    assert result["trades"][0]["action"] == "BUY_INITIAL"
+    assert result["trades"][0]["signal_day"] == rows[60]["observed_on"]
+    assert result["trades"][0]["fill_day"] == rows[61]["observed_on"]
+    assert result["terminal_exit_fee"] > 0
+    assert result["final_value"] == round(result["mark_to_market_value"] - result["terminal_exit_fee"], 2)
+    assert result["fees_paid"] >= result["terminal_exit_fee"]
+
+
+def test_swing_v3_features_and_model_window_do_not_use_future_rows():
+    rows = _v3_rows([100 * 1.0015 ** index for index in range(70)])
+    before = swing_v3_features(rows[:61])
+    observations = _standardised_observations(rows[:61])
+    for row in rows[61:]:
+        row["price"] *= 10
+    after = swing_v3_features(rows[:61])
+    assert before == after
+    assert "2026-" not in str(observations)
+    assert "gold_cny_per_gram" not in str(observations)
+
+
+def test_blind_gold_v3_context_forbids_dates_and_unknown_fields(monkeypatch):
+    class Response:
+        def raise_for_status(self): pass
+        def json(self):
+            return {"choices": [{"message": {"content": '{"action":"HOLD","confidence":0.4,"risk_severity":"mild","reason_codes":["RESISTANCE_TOO_CLOSE"]}'}}]}
+
+    sent = {}
+    monkeypatch.setattr("src.quant_research.intelligence._read_key", lambda: "test-key")
+    monkeypatch.setattr("src.quant_research.intelligence.httpx.post", lambda *_args, **kwargs: sent.update(kwargs) or Response())
+    context = BlindGoldAnalysisContext(
+        sequence=61, candidate_stage="entry", requested_horizon_sessions=[5, 10], current_weight_pct=0,
+        held_sessions=0, buy_fee_pct=0, sell_fee_pct=0.4, max_factor_age_sessions=1, macro_score=1, macro_available=3,
+    ).model_dump()
+    result = analyse_blind_gold([{"day": 1, "gold_index_base100": 100, "gold_return_1d_pct": 0.1}], "cash", "HOLD", "trade_quality", context)
+    assert result["risk_severity"] == "mild"
+    assert result["reason_codes"] == ["RESISTANCE_TOO_CLOSE"]
+    assert "2026-" not in str(sent["json"])
+    try:
+        analyse_blind_gold([{"day": 1}], "cash", "HOLD", "trade_quality", {**context, "observed_on": "2026-01-01"})
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("the feature-only context accepted a calendar field")

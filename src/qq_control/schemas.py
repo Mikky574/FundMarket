@@ -2,6 +2,8 @@
 
 from pydantic import BaseModel, Field
 
+from src.quant_research.contracts import BlindGoldAnalysisContext
+
 
 class PublicAiDecisionRequest(BaseModel):
     decision_id: str | None = None
@@ -82,3 +84,4 @@ class BlindGoldDecisionRequest(BaseModel):
     rule_candidate: str
     observations: list[dict] = Field(min_length=1, max_length=20)
     analysis_mode: str = "technical_breakout"
+    analysis_context: BlindGoldAnalysisContext | None = None
