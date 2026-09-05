@@ -8,7 +8,7 @@ from tools.deepseek_blind_gold_tool import invoke
 from demos.gold_factor_lab.factor_calibration import calibrate
 from demos.gold_factor_lab.evaluation_report import build_html as build_evaluation_html
 from demos.gold_factor_lab.swing_replay import replay as swing_replay
-from demos.gold_factor_lab.swing_v3 import _standardised_observations, features as swing_v3_features, replay as swing_v3_replay
+from demos.gold_factor_lab.swing_v3 import PositionState, _promote_value_to_core, _standardised_observations, _trim_core, features as swing_v3_features, replay as swing_v3_replay
 from src.quant_research.contracts import BlindGoldAnalysisContext
 from src.quant_research.intelligence import analyse_blind_gold
 
@@ -225,8 +225,9 @@ def _v3_rows(prices: list[float]) -> list[dict]:
 def test_swing_v3_accrues_terminal_sell_fee_and_uses_next_quote():
     rows = _v3_rows([100 * 1.002 ** index for index in range(135)])
     result = swing_v3_replay(rows, start=date.fromisoformat(rows[120]["observed_on"]), end=date.fromisoformat(rows[127]["observed_on"]), tool_url="unused", use_deepseek=False)
-    assert result["trades"][0]["action"] == "BUY_CORE"
+    assert result["trades"][0]["action"] == "BUY_SATELLITE"
     assert any(item["action"] == "BUY_SATELLITE" for item in result["trades"])
+    assert not any(item["action"] == "BUY_CORE" for item in result["trades"])
     assert result["trades"][0]["signal_day"] == rows[120]["observed_on"]
     assert result["trades"][0]["fill_day"] == rows[121]["observed_on"]
     assert result["terminal_exit_fee"] > 0
@@ -253,7 +254,25 @@ def test_swing_v3_sells_satellite_without_forcing_core_exit():
     result = swing_v3_replay(rows, start=date.fromisoformat(rows[120]["observed_on"]), end=date.fromisoformat(rows[128]["observed_on"]), tool_url="unused", use_deepseek=False)
     assert any(item["action"] == "SELL_SATELLITE" for item in result["trades"])
     assert not any(item["action"] == "SELL_CORE" for item in result["trades"])
-    assert result["open_core_grams"] > 0
+    assert result["open_core_grams"] == 0
+
+
+def test_swing_v3_promotes_existing_value_inventory_to_core_without_buying_high():
+    state = PositionState(cash=70_000, value_grams=300)
+    grams, notional = _promote_value_to_core(state, price=100, target_weight=0.25)
+    assert (grams, notional) == (250, 25_000)
+    assert state.core_grams == 250
+    assert state.value_grams == 50
+    assert state.cash == 70_000
+
+
+def test_swing_v3_core_trim_keeps_half_the_position_and_records_fee():
+    state = PositionState(cash=0, core_grams=100)
+    notional, fee = _trim_core(state, price=100, fraction=0.5, sell_fee=0.004)
+    assert (notional, fee) == (5_000, 20)
+    assert state.core_grams == 50
+    assert state.cash == 4_980
+    assert state.core_trimmed is True
 
 
 def test_swing_v3_value_layer_enters_a_stabilised_discount_without_price_constants():

@@ -34,6 +34,9 @@ class SwingV3Config:
     warmup_sessions: int = 65
     sell_fee: float = SELL_FEE
     core_weight: float = 0.25
+    core_entry_valuation_z: float = 0.5
+    core_trim_valuation_z: float = 1.5
+    core_trim_fraction: float = 0.50
     value_initial_weight: float = 0.15
     value_add_weight: float = 0.15
     satellite_initial_weight: float = 0.35
@@ -67,6 +70,7 @@ class PositionState:
     add_stage: int = 0
     below_ema20_streak: int = 0
     below_sma60_streak: int = 0
+    core_trimmed: bool = False
 
 
 PanelProvider = Callable[[list[dict], dict, PositionState], dict[str, Decision]]
@@ -323,6 +327,7 @@ def _sell_layer(state: PositionState, *, layer: str, price: float, sell_fee: flo
     state.cash += notional - fee
     if layer == "core":
         state.core_grams = 0.0
+        state.core_trimmed = False
     elif layer == "value":
         state.value_grams = state.value_average_entry = 0.0
     else:
@@ -330,6 +335,29 @@ def _sell_layer(state: PositionState, *, layer: str, price: float, sell_fee: flo
         state.satellite_average_entry = state.satellite_entry_volatility = state.max_close = 0.0
         state.held_sessions = state.add_stage = state.below_ema20_streak = 0
     return notional, fee
+
+
+def _trim_core(state: PositionState, *, price: float, fraction: float, sell_fee: float) -> tuple[float, float]:
+    """Realise part of a mature core position while preserving trend exposure."""
+    grams = state.core_grams * min(1.0, max(0.0, fraction))
+    notional = grams * price
+    fee = notional * sell_fee
+    state.core_grams -= grams
+    state.cash += notional - fee
+    state.core_trimmed = True
+    return notional, fee
+
+
+def _promote_value_to_core(state: PositionState, *, price: float, target_weight: float) -> tuple[float, float]:
+    """Reclassify already-owned low-valuation gold as core without trading it."""
+    total_value = state.cash + _total_grams(state) * price
+    target_grams = total_value * target_weight / price
+    grams = min(state.value_grams, max(0.0, target_grams - state.core_grams))
+    if grams <= 1e-9:
+        return 0.0, 0.0
+    state.value_grams -= grams
+    state.core_grams += grams
+    return grams, grams * price
 
 
 def replay(rows: list[dict], *, start: date, end: date, tool_url: str,
@@ -367,7 +395,13 @@ def replay(rows: list[dict], *, start: date, end: date, tool_url: str,
         core_exit_reason = None
         if state.core_grams and (feature["ema20"] < feature["sma60"] or state.below_sma60_streak >= 2):
             core_exit_reason = "LONG_TREND_FAILED"
+        core_trim_reason = None
+        if state.core_grams and not core_exit_reason and not state.core_trimmed and feature["valuation_z"] >= config.core_trim_valuation_z and feature["price"] < feature["ema5"]:
+            core_trim_reason = "VALUATION_PREMIUM_AND_SHORT_TREND_WEAKNESS"
         satellite_exit_reason = _exit_reason(feature, state, config=config) if state.satellite_grams else None
+        promoted_grams, promoted_notional = (0.0, 0.0)
+        if not core_exit_reason and not value_exit and not state.core_grams and state.value_grams and feature["long_trend"]:
+            promoted_grams, promoted_notional = _promote_value_to_core(state, price=feature["price"], target_weight=config.core_weight)
         stage = "entry" if not state.satellite_grams else "add"
         add_kind = "none"
         if state.satellite_grams and not satellite_exit_reason and feature["uptrend"]:
@@ -391,7 +425,9 @@ def replay(rows: list[dict], *, start: date, end: date, tool_url: str,
         actions: list[tuple[str, str, float]] = []
         if core_exit_reason:
             actions.append(("SELL_CORE", core_exit_reason, 0.0))
-        elif not state.core_grams and feature["long_trend"]:
+        elif core_trim_reason:
+            actions.append(("TRIM_CORE", core_trim_reason, config.core_trim_fraction))
+        elif not state.core_grams and feature["long_trend"] and feature["valuation_z"] <= config.core_entry_valuation_z:
             actions.append(("BUY_CORE", "LONG_TREND_CORE_ALLOCATION", config.core_weight))
         if value_exit:
             actions.append(("SELL_VALUE", "VALUATION_PREMIUM_AND_SHORT_TREND_WEAKNESS", 0.0))
@@ -436,7 +472,12 @@ def replay(rows: list[dict], *, start: date, end: date, tool_url: str,
                                "portfolio_weight_pct": round(target_weight * 100, 3), "reason": reason})
                 executed.append(action)
             else:
-                if action in {"SELL_CORE", "SELL_VALUE", "SELL_SATELLITE"}:
+                if action == "TRIM_CORE":
+                    actual_notional, fee = _trim_core(state, price=fill_price, fraction=target_weight, sell_fee=config.sell_fee)
+                    trades.append({"action": action, "signal_day": row["observed_on"], "fill_day": fill["observed_on"],
+                                   "price": fill_price, "notional": round(actual_notional, 2), "fee": round(fee, 2), "reason": reason})
+                    executed.append(action)
+                elif action in {"SELL_CORE", "SELL_VALUE", "SELL_SATELLITE"}:
                     layer = {"SELL_CORE": "core", "SELL_VALUE": "value", "SELL_SATELLITE": "satellite"}[action]
                     actual_notional, fee = _sell_layer(state, layer=layer, price=fill_price, sell_fee=config.sell_fee)
                     trades.append({"action": action, "signal_day": row["observed_on"], "fill_day": fill["observed_on"],
@@ -445,6 +486,7 @@ def replay(rows: list[dict], *, start: date, end: date, tool_url: str,
         events.append({"signal_day": row["observed_on"], "fill_day": fill["observed_on"], "candidate": candidate,
                        "add_candidate": add_kind, "valuation_center": round(feature["valuation_center"], 4), "valuation_z": round(feature["valuation_z"], 3),
                        "macro_score": feature["macro_score"], "macro_multiplier": macro_multiplier,
+                       "value_to_core_reclassification": {"grams": round(promoted_grams, 8), "notional": round(promoted_notional, 2)},
                        "analysis_context": context, "analyses": _analysis_audit(panel), "model_fusion": fusion,
                        "executed": executed or ["HOLD"], "reason": [item[1] for item in actions]})
     if first_signal_index is None:
@@ -462,7 +504,7 @@ def replay(rows: list[dict], *, start: date, end: date, tool_url: str,
         "contract": {"signal": "daily close", "execution": "next observed daily quote", "buy_fee_rate": 0.0,
                      "sell_fee_rate": config.sell_fee, "terminal_valuation": "net liquidation at final observed quote"},
         "frozen_rule": {
-            "core": "25% core allocation opens only in a rising long trend and exits only after long-trend failure",
+            "core": "25% core allocation is built from existing low-valuation inventory after long-trend confirmation; cash may create it only at or below a modest valuation premium, one half may be realised at an extended premium plus short-trend weakness, and the remainder exits only after long-trend failure",
             "value": "15% value allocation opens after a stabilised discount below a 120-session median; one 15% add only at a deeper discount; it exits only when premium and short-trend weakness coincide",
             "satellite_entry": "price > EMA20 > SMA60 with positive EMA20 slope, then either 20-session breakout >0.25 sigma or pullback reclaim",
             "satellite_sizing": "35% initial satellite; adds only after a profitable 0.75-sigma move and then a supported breakout",
