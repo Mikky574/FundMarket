@@ -31,11 +31,12 @@ INITIAL_CASH = 100_000.0
 class SwingV3Config:
     """Frozen, fee-aware strategy parameters for one replay version."""
 
-    warmup_sessions: int = 60
+    warmup_sessions: int = 65
     sell_fee: float = SELL_FEE
-    initial_weight: float = 0.40
-    add_one_weight: float = 0.30
-    add_two_weight: float = 0.30
+    core_weight: float = 0.25
+    satellite_initial_weight: float = 0.35
+    satellite_add_one_weight: float = 0.25
+    satellite_add_two_weight: float = 0.15
     breakout_sigma: float = 0.25
     add_profit_sigma: float = 0.75
     initial_stop_sigma: float = 1.50
@@ -48,13 +49,15 @@ class SwingV3Config:
 @dataclass
 class PositionState:
     cash: float
-    grams: float = 0.0
-    average_entry: float = 0.0
-    entry_volatility: float = 0.0
+    core_grams: float = 0.0
+    satellite_grams: float = 0.0
+    satellite_average_entry: float = 0.0
+    satellite_entry_volatility: float = 0.0
     max_close: float = 0.0
     held_sessions: int = 0
     add_stage: int = 0
     below_ema20_streak: int = 0
+    below_sma60_streak: int = 0
 
 
 PanelProvider = Callable[[list[dict], dict, PositionState], dict[str, Decision]]
@@ -90,9 +93,10 @@ def features(history: list[dict], *, config: SwingV3Config = SwingV3Config()) ->
     price = prices[-1]
     ema5, ema20, sma60 = _ema(prices, 5), _ema(prices, 20), _sma(prices, 60)
     prior_ema5, ema20_five_sessions_ago = _ema(prices[:-1], 5), _ema(prices[:-5], 20)
+    sma60_five_sessions_ago = _sma(prices[:-5], 60)
     volatility = _realized_volatility(prices, period=20, floor=config.volatility_floor)
     assert ema5 is not None and ema20 is not None and sma60 is not None
-    assert prior_ema5 is not None and ema20_five_sessions_ago is not None and volatility is not None
+    assert prior_ema5 is not None and ema20_five_sessions_ago is not None and sma60_five_sessions_ago is not None and volatility is not None
     resistance20, support20 = max(prices[-21:-1]), min(prices[-21:-1])
     macro_score, macro_available, oil_risk, macro_labels = _macro_context(history)
     return {
@@ -102,6 +106,7 @@ def features(history: list[dict], *, config: SwingV3Config = SwingV3Config()) ->
         "sma60": sma60,
         "prior_ema5": prior_ema5,
         "ema20_five_sessions_ago": ema20_five_sessions_ago,
+        "sma60_five_sessions_ago": sma60_five_sessions_ago,
         "volatility": volatility,
         "resistance20": resistance20,
         "support20": support20,
@@ -109,6 +114,7 @@ def features(history: list[dict], *, config: SwingV3Config = SwingV3Config()) ->
         "low5": min(prices[-6:-1]),
         "previous_price": prices[-2],
         "uptrend": price > ema20 > sma60 and ema20 > ema20_five_sessions_ago,
+        "long_trend": price > sma60 and ema20 > sma60 and sma60 >= sma60_five_sessions_ago,
         "macro_score": macro_score,
         "macro_available": macro_available,
         "oil_risk": oil_risk,
@@ -142,8 +148,12 @@ def _macro_multiplier(feature: dict) -> float:
 
 
 def _position_weight(state: PositionState, price: float) -> float:
-    value = state.cash + state.grams * price
-    return 0.0 if value <= 0 else state.grams * price / value
+    value = state.cash + _total_grams(state) * price
+    return 0.0 if value <= 0 else _total_grams(state) * price / value
+
+
+def _total_grams(state: PositionState) -> float:
+    return state.core_grams + state.satellite_grams
 
 
 def _standardised_observations(history: list[dict]) -> list[dict]:
@@ -196,7 +206,7 @@ def _model_panel(history: list[dict], feature: dict, state: PositionState, *, st
     return {
         mode: local_tool_decision(
             history,
-            in_position=state.grams > 0,
+            in_position=_total_grams(state) > 0,
             rule=neutral_rule,
             tool_url=tool_url,
             analysis_mode=mode,
@@ -245,38 +255,60 @@ def _analysis_audit(panel: dict[str, Decision]) -> dict:
 
 def _exit_reason(feature: dict, state: PositionState, *, config: SwingV3Config) -> str | None:
     price = feature["price"]
-    if price <= state.average_entry * (1 - config.initial_stop_sigma * state.entry_volatility):
+    if price <= state.satellite_average_entry * (1 - config.initial_stop_sigma * state.satellite_entry_volatility):
         return "INITIAL_VOLATILITY_STOP"
-    trail_active = state.max_close >= state.average_entry * (1 + config.trail_activation_sigma * state.entry_volatility)
+    trail_active = state.max_close >= state.satellite_average_entry * (1 + config.trail_activation_sigma * state.satellite_entry_volatility)
     if trail_active and price <= state.max_close * (1 - config.trail_sigma * feature["volatility"]):
         return "TRAILING_VOLATILITY_STOP"
     if state.below_ema20_streak >= 2:
         return "TWO_CLOSES_BELOW_EMA20"
     if feature["ema20"] < feature["sma60"]:
         return "MEDIUM_TREND_FAILED"
-    if state.held_sessions >= config.no_progress_sessions and price < state.average_entry * (1 + 0.25 * state.entry_volatility):
+    if state.held_sessions >= config.no_progress_sessions and price < state.satellite_average_entry * (1 + 0.25 * state.satellite_entry_volatility):
         return "NO_PROGRESS_DE_RISK"
     return None
 
 
-def _buy_to_target(state: PositionState, *, price: float, target_weight: float) -> tuple[float, float]:
-    """Buy only enough at the next quote to reach a capped portfolio weight."""
-    total_value = state.cash + state.grams * price
+def _buy_layer_to_target(state: PositionState, *, layer: str, price: float, target_weight: float) -> tuple[float, float]:
+    """Buy one layer only enough to reach its capped portfolio weight."""
+    if layer not in {"core", "satellite"}:
+        raise ValueError("unknown position layer")
+    total_value = state.cash + _total_grams(state) * price
     desired_value = total_value * min(1.0, max(0.0, target_weight))
-    amount = min(state.cash, max(0.0, desired_value - state.grams * price))
+    current_grams = state.core_grams if layer == "core" else state.satellite_grams
+    amount = min(state.cash, max(0.0, desired_value - current_grams * price))
     if amount <= 1e-9:
         return 0.0, _position_weight(state, price)
     new_grams = amount / price
-    total_grams = state.grams + new_grams
-    state.average_entry = (state.average_entry * state.grams + price * new_grams) / total_grams
-    state.grams, state.cash = total_grams, state.cash - amount
+    if layer == "core":
+        state.core_grams += new_grams
+    else:
+        total_grams = state.satellite_grams + new_grams
+        state.satellite_average_entry = (state.satellite_average_entry * state.satellite_grams + price * new_grams) / total_grams
+        state.satellite_grams = total_grams
+    state.cash -= amount
     return amount, _position_weight(state, price)
+
+
+def _sell_layer(state: PositionState, *, layer: str, price: float, sell_fee: float) -> tuple[float, float]:
+    """Liquidate one layer at the next quote and apply the explicit sell fee."""
+    grams = state.core_grams if layer == "core" else state.satellite_grams
+    notional = grams * price
+    fee = notional * sell_fee
+    state.cash += notional - fee
+    if layer == "core":
+        state.core_grams = 0.0
+    else:
+        state.satellite_grams = 0.0
+        state.satellite_average_entry = state.satellite_entry_volatility = state.max_close = 0.0
+        state.held_sessions = state.add_stage = state.below_ema20_streak = 0
+    return notional, fee
 
 
 def replay(rows: list[dict], *, start: date, end: date, tool_url: str,
            use_deepseek: bool = True, panel_provider: PanelProvider | None = None,
            config: SwingV3Config = SwingV3Config()) -> dict:
-    """Replay t-close decisions filled at t+1, with end-of-period net valuation."""
+    """Replay core plus satellite decisions, filled at the next observed quote."""
     if start > end:
         raise ValueError("start must not be after end")
     if len(rows) < config.warmup_sessions + 2:
@@ -293,20 +325,25 @@ def replay(rows: list[dict], *, start: date, end: date, tool_url: str,
         history = rows[:index + 1]
         feature = features(history, config=config)
         candidate = entry_kind(feature, config=config)
-        if state.grams:
+        if state.core_grams:
+            state.below_sma60_streak = state.below_sma60_streak + 1 if feature["price"] < feature["sma60"] else 0
+        if state.satellite_grams:
             state.held_sessions += 1
             state.max_close = max(state.max_close, feature["price"])
             state.below_ema20_streak = state.below_ema20_streak + 1 if feature["price"] < feature["ema20"] else 0
-        exit_reason = _exit_reason(feature, state, config=config) if state.grams else None
-        stage = "entry" if not state.grams else "add"
+        core_exit_reason = None
+        if state.core_grams and (feature["ema20"] < feature["sma60"] or state.below_sma60_streak >= 2):
+            core_exit_reason = "LONG_TREND_FAILED"
+        satellite_exit_reason = _exit_reason(feature, state, config=config) if state.satellite_grams else None
+        stage = "entry" if not state.satellite_grams else "add"
         add_kind = "none"
-        if state.grams and not exit_reason and feature["uptrend"]:
-            profitable = feature["price"] >= state.average_entry * (1 + config.add_profit_sigma * state.entry_volatility)
+        if state.satellite_grams and not satellite_exit_reason and feature["uptrend"]:
+            profitable = feature["price"] >= state.satellite_average_entry * (1 + config.add_profit_sigma * state.satellite_entry_volatility)
             if state.add_stage == 0 and profitable:
                 add_kind = "add_one"
             elif state.add_stage == 1 and candidate == "breakout" and feature["macro_score"] >= 1:
                 add_kind = "add_two"
-        setup_exists = (not state.grams and candidate != "none") or add_kind != "none"
+        setup_exists = (not state.satellite_grams and candidate != "none") or add_kind != "none"
         panel: dict[str, Decision] = {}
         context: dict | None = None
         if setup_exists:
@@ -318,68 +355,74 @@ def replay(rows: list[dict], *, start: date, end: date, tool_url: str,
             model_calls += len(panel)
         fusion = _fuse_panel(panel)
         macro_multiplier = _macro_multiplier(feature)
-        action, reason, target_weight = "HOLD", "", _position_weight(state, feature["price"])
-        if exit_reason:
-            action, reason = "SELL_ALL", exit_reason
+        actions: list[tuple[str, str, float]] = []
+        if core_exit_reason:
+            actions.append(("SELL_CORE", core_exit_reason, 0.0))
+        elif not state.core_grams and feature["long_trend"]:
+            actions.append(("BUY_CORE", "LONG_TREND_CORE_ALLOCATION", config.core_weight))
+        if satellite_exit_reason:
+            actions.append(("SELL_SATELLITE", satellite_exit_reason, 0.0))
         elif setup_exists and not fusion["hard_block"]:
-            if not state.grams:
-                action, reason = "BUY_INITIAL", candidate.upper()
-                target_weight = config.initial_weight * macro_multiplier * fusion["multiplier"]
+            if not state.satellite_grams:
+                actions.append(("BUY_SATELLITE", candidate.upper(), config.satellite_initial_weight * macro_multiplier * fusion["multiplier"]))
             elif add_kind == "add_one":
-                action, reason = "ADD_ONE", "PROFIT_CONFIRMED_TREND"
-                target_weight = min(config.initial_weight + config.add_one_weight, config.initial_weight + config.add_one_weight * macro_multiplier * fusion["multiplier"])
+                actions.append(("ADD_SATELLITE_ONE", "PROFIT_CONFIRMED_TREND", min(config.satellite_initial_weight + config.satellite_add_one_weight,
+                                                                                       config.satellite_initial_weight + config.satellite_add_one_weight * macro_multiplier * fusion["multiplier"])))
             elif add_kind == "add_two":
-                action, reason = "ADD_TWO", "BREAKOUT_AFTER_PROFIT"
-                target_weight = min(1.0, config.initial_weight + config.add_one_weight + config.add_two_weight * fusion["multiplier"])
+                actions.append(("ADD_SATELLITE_TWO", "BREAKOUT_AFTER_PROFIT", min(1.0 - config.core_weight,
+                                                                                       config.satellite_initial_weight + config.satellite_add_one_weight + config.satellite_add_two_weight * fusion["multiplier"])))
         elif setup_exists and fusion["hard_block"]:
-            reason = "MODEL_HARD_BLOCK"
+            actions.append(("HOLD", "MODEL_HARD_BLOCK", _position_weight(state, feature["price"])))
         fill_price = float(fill["price"])
-        actual_notional, fee = 0.0, 0.0
-        if action in {"BUY_INITIAL", "ADD_ONE", "ADD_TWO"}:
-            actual_notional, target_weight = _buy_to_target(state, price=fill_price, target_weight=target_weight)
+        executed = []
+        for action, reason, target_weight in actions:
+            actual_notional, fee = 0.0, 0.0
+            if action == "BUY_CORE":
+                actual_notional, target_weight = _buy_layer_to_target(state, layer="core", price=fill_price, target_weight=target_weight)
+            elif action in {"BUY_SATELLITE", "ADD_SATELLITE_ONE", "ADD_SATELLITE_TWO"}:
+                actual_notional, target_weight = _buy_layer_to_target(state, layer="satellite", price=fill_price, target_weight=target_weight)
             if actual_notional > 0:
-                if action == "BUY_INITIAL":
-                    state.entry_volatility, state.max_close = feature["volatility"], fill_price
+                if action == "BUY_SATELLITE":
+                    state.satellite_entry_volatility, state.max_close = feature["volatility"], fill_price
                     state.held_sessions, state.add_stage, state.below_ema20_streak = 0, 0, 0
-                elif action == "ADD_ONE":
+                elif action == "ADD_SATELLITE_ONE":
                     state.add_stage = 1
-                else:
+                elif action == "ADD_SATELLITE_TWO":
                     state.add_stage = 2
                 trades.append({"action": action, "signal_day": row["observed_on"], "fill_day": fill["observed_on"],
                                "price": fill_price, "notional": round(actual_notional, 2), "fee": 0.0,
                                "target_weight_pct": round(target_weight * 100, 3), "reason": reason})
+                executed.append(action)
             else:
-                action, reason = "HOLD", "TARGET_WEIGHT_ALREADY_MET"
-        elif action == "SELL_ALL" and state.grams:
-            notional = state.grams * fill_price
-            fee = notional * config.sell_fee
-            state.cash, state.grams = state.cash + notional - fee, 0.0
-            trades.append({"action": action, "signal_day": row["observed_on"], "fill_day": fill["observed_on"],
-                           "price": fill_price, "notional": round(notional, 2), "fee": round(fee, 2), "reason": reason})
-            state.average_entry = state.entry_volatility = state.max_close = 0.0
-            state.held_sessions = state.add_stage = state.below_ema20_streak = 0
+                if action in {"SELL_CORE", "SELL_SATELLITE"}:
+                    layer = "core" if action == "SELL_CORE" else "satellite"
+                    actual_notional, fee = _sell_layer(state, layer=layer, price=fill_price, sell_fee=config.sell_fee)
+                    trades.append({"action": action, "signal_day": row["observed_on"], "fill_day": fill["observed_on"],
+                                   "price": fill_price, "notional": round(actual_notional, 2), "fee": round(fee, 2), "reason": reason})
+                    executed.append(action)
         events.append({"signal_day": row["observed_on"], "fill_day": fill["observed_on"], "candidate": candidate,
                        "add_candidate": add_kind, "macro_score": feature["macro_score"], "macro_multiplier": macro_multiplier,
                        "analysis_context": context, "analyses": _analysis_audit(panel), "model_fusion": fusion,
-                       "executed": action, "reason": reason})
+                       "executed": executed or ["HOLD"], "reason": [item[1] for item in actions]})
     if first_signal_index is None:
         raise ValueError("no eligible signal sessions in the requested period")
     last_price = float(rows[-1]["price"])
-    mark_to_market_value = state.cash + state.grams * last_price
-    terminal_exit_fee = state.grams * last_price * config.sell_fee if state.grams else 0.0
+    mark_to_market_value = state.cash + _total_grams(state) * last_price
+    terminal_exit_fee = _total_grams(state) * last_price * config.sell_fee if _total_grams(state) else 0.0
     final_value = mark_to_market_value - terminal_exit_fee
     benchmark_entry = float(rows[first_signal_index + 1]["price"])
     buy_hold_value = INITIAL_CASH / benchmark_entry * last_price * (1 - config.sell_fee)
     realized_fees = sum(float(trade["fee"]) for trade in trades)
     return {
-        "strategy": "swing_v3_fee_aware_trend_and_pullback",
+        "strategy": "swing_v3_core_satellite_volatility_targeted",
         "target_period": {"start": start.isoformat(), "end": end.isoformat()},
         "contract": {"signal": "daily close", "execution": "next observed daily quote", "buy_fee_rate": 0.0,
                      "sell_fee_rate": config.sell_fee, "terminal_valuation": "net liquidation at final observed quote"},
         "frozen_rule": {
-            "entry": "price > EMA20 > SMA60 with positive EMA20 slope, then either 20-session breakout >0.25 sigma or pullback reclaim",
-            "sizing": "40% initial; 30% adds only after a profitable 0.75-sigma move and then a supported breakout",
-            "exit": "1.5-sigma initial stop, activated 2-sigma trailing stop, two closes below EMA20, trend failure, or 20-session no-progress de-risk",
+            "core": "25% core allocation opens only in a rising long trend and exits only after long-trend failure",
+            "satellite_entry": "price > EMA20 > SMA60 with positive EMA20 slope, then either 20-session breakout >0.25 sigma or pullback reclaim",
+            "satellite_sizing": "35% initial satellite; adds only after a profitable 0.75-sigma move and then a supported breakout",
+            "satellite_exit": "1.5-sigma initial stop, activated 2-sigma trailing stop, two closes below EMA20, trend failure, or 20-session no-progress de-risk",
             "model": "four specialised roles may cap size or hard-block only; no role can create an entry",
             "macro": "macro context multiplies target weight (50/75/100%) rather than vetoing a technical setup",
         },
@@ -387,7 +430,8 @@ def replay(rows: list[dict], *, start: date, end: date, tool_url: str,
         "final_value": round(final_value, 2),
         "mark_to_market_value": round(mark_to_market_value, 2),
         "terminal_exit_fee": round(terminal_exit_fee, 2),
-        "open_grams": round(state.grams, 8),
+        "open_core_grams": round(state.core_grams, 8),
+        "open_satellite_grams": round(state.satellite_grams, 8),
         "return_percent": round((final_value / INITIAL_CASH - 1) * 100, 3),
         "buy_and_hold_final_value": round(buy_hold_value, 2),
         "buy_and_hold_return_percent": round((buy_hold_value / INITIAL_CASH - 1) * 100, 3),

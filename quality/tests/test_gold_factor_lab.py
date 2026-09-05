@@ -223,26 +223,37 @@ def _v3_rows(prices: list[float]) -> list[dict]:
 
 
 def test_swing_v3_accrues_terminal_sell_fee_and_uses_next_quote():
-    rows = _v3_rows([100 * 1.002 ** index for index in range(70)])
-    result = swing_v3_replay(rows, start=date(2026, 3, 2), end=date(2026, 3, 9), tool_url="unused", use_deepseek=False)
-    assert result["trades"][0]["action"] == "BUY_INITIAL"
-    assert result["trades"][0]["signal_day"] == rows[60]["observed_on"]
-    assert result["trades"][0]["fill_day"] == rows[61]["observed_on"]
+    rows = _v3_rows([100 * 1.002 ** index for index in range(76)])
+    result = swing_v3_replay(rows, start=date.fromisoformat(rows[65]["observed_on"]), end=date.fromisoformat(rows[72]["observed_on"]), tool_url="unused", use_deepseek=False)
+    assert result["trades"][0]["action"] == "BUY_CORE"
+    assert any(item["action"] == "BUY_SATELLITE" for item in result["trades"])
+    assert result["trades"][0]["signal_day"] == rows[65]["observed_on"]
+    assert result["trades"][0]["fill_day"] == rows[66]["observed_on"]
     assert result["terminal_exit_fee"] > 0
     assert result["final_value"] == round(result["mark_to_market_value"] - result["terminal_exit_fee"], 2)
     assert result["fees_paid"] >= result["terminal_exit_fee"]
 
 
 def test_swing_v3_features_and_model_window_do_not_use_future_rows():
-    rows = _v3_rows([100 * 1.0015 ** index for index in range(70)])
-    before = swing_v3_features(rows[:61])
-    observations = _standardised_observations(rows[:61])
-    for row in rows[61:]:
+    rows = _v3_rows([100 * 1.0015 ** index for index in range(76)])
+    before = swing_v3_features(rows[:66])
+    observations = _standardised_observations(rows[:66])
+    for row in rows[66:]:
         row["price"] *= 10
-    after = swing_v3_features(rows[:61])
+    after = swing_v3_features(rows[:66])
     assert before == after
     assert "2026-" not in str(observations)
     assert "gold_cny_per_gram" not in str(observations)
+
+
+def test_swing_v3_sells_satellite_without_forcing_core_exit():
+    rising = [100 * 1.002 ** index for index in range(71)]
+    prices = rising + [rising[-1] * 0.98, rising[-1] * 0.979, rising[-1] * 0.978, rising[-1] * 0.977]
+    rows = _v3_rows(prices)
+    result = swing_v3_replay(rows, start=date.fromisoformat(rows[65]["observed_on"]), end=date.fromisoformat(rows[73]["observed_on"]), tool_url="unused", use_deepseek=False)
+    assert any(item["action"] == "SELL_SATELLITE" for item in result["trades"])
+    assert not any(item["action"] == "SELL_CORE" for item in result["trades"])
+    assert result["open_core_grams"] > 0
 
 
 def test_blind_gold_v3_context_forbids_dates_and_unknown_fields(monkeypatch):
