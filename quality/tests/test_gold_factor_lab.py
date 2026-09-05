@@ -223,37 +223,46 @@ def _v3_rows(prices: list[float]) -> list[dict]:
 
 
 def test_swing_v3_accrues_terminal_sell_fee_and_uses_next_quote():
-    rows = _v3_rows([100 * 1.002 ** index for index in range(76)])
-    result = swing_v3_replay(rows, start=date.fromisoformat(rows[65]["observed_on"]), end=date.fromisoformat(rows[72]["observed_on"]), tool_url="unused", use_deepseek=False)
+    rows = _v3_rows([100 * 1.002 ** index for index in range(135)])
+    result = swing_v3_replay(rows, start=date.fromisoformat(rows[120]["observed_on"]), end=date.fromisoformat(rows[127]["observed_on"]), tool_url="unused", use_deepseek=False)
     assert result["trades"][0]["action"] == "BUY_CORE"
     assert any(item["action"] == "BUY_SATELLITE" for item in result["trades"])
-    assert result["trades"][0]["signal_day"] == rows[65]["observed_on"]
-    assert result["trades"][0]["fill_day"] == rows[66]["observed_on"]
+    assert result["trades"][0]["signal_day"] == rows[120]["observed_on"]
+    assert result["trades"][0]["fill_day"] == rows[121]["observed_on"]
     assert result["terminal_exit_fee"] > 0
     assert result["final_value"] == round(result["mark_to_market_value"] - result["terminal_exit_fee"], 2)
     assert result["fees_paid"] >= result["terminal_exit_fee"]
 
 
 def test_swing_v3_features_and_model_window_do_not_use_future_rows():
-    rows = _v3_rows([100 * 1.0015 ** index for index in range(76)])
-    before = swing_v3_features(rows[:66])
-    observations = _standardised_observations(rows[:66])
-    for row in rows[66:]:
+    rows = _v3_rows([100 * 1.0015 ** index for index in range(135)])
+    before = swing_v3_features(rows[:121])
+    observations = _standardised_observations(rows[:121])
+    for row in rows[121:]:
         row["price"] *= 10
-    after = swing_v3_features(rows[:66])
+    after = swing_v3_features(rows[:121])
     assert before == after
     assert "2026-" not in str(observations)
     assert "gold_cny_per_gram" not in str(observations)
 
 
 def test_swing_v3_sells_satellite_without_forcing_core_exit():
-    rising = [100 * 1.002 ** index for index in range(71)]
+    rising = [100 * 1.002 ** index for index in range(126)]
     prices = rising + [rising[-1] * 0.98, rising[-1] * 0.979, rising[-1] * 0.978, rising[-1] * 0.977]
     rows = _v3_rows(prices)
-    result = swing_v3_replay(rows, start=date.fromisoformat(rows[65]["observed_on"]), end=date.fromisoformat(rows[73]["observed_on"]), tool_url="unused", use_deepseek=False)
+    result = swing_v3_replay(rows, start=date.fromisoformat(rows[120]["observed_on"]), end=date.fromisoformat(rows[128]["observed_on"]), tool_url="unused", use_deepseek=False)
     assert any(item["action"] == "SELL_SATELLITE" for item in result["trades"])
     assert not any(item["action"] == "SELL_CORE" for item in result["trades"])
     assert result["open_core_grams"] > 0
+
+
+def test_swing_v3_value_layer_enters_a_stabilised_discount_without_price_constants():
+    prices = [100.0] * 120 + [98.0, 97.0, 97.2, 97.3, 97.4]
+    rows = _v3_rows(prices)
+    result = swing_v3_replay(rows, start=date.fromisoformat(rows[122]["observed_on"]), end=date.fromisoformat(rows[123]["observed_on"]), tool_url="unused", use_deepseek=False)
+    value_trade = next(item for item in result["trades"] if item["action"] == "BUY_VALUE")
+    assert value_trade["price"] == rows[123]["price"]
+    assert value_trade["reason"] == "VALUATION_DISCOUNT_STABILISED"
 
 
 def test_blind_gold_v3_context_forbids_dates_and_unknown_fields(monkeypatch):
