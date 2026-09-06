@@ -8,7 +8,7 @@ from tools.deepseek_blind_gold_tool import invoke
 from demos.gold_factor_lab.factor_calibration import calibrate
 from demos.gold_factor_lab.evaluation_report import build_html as build_evaluation_html
 from demos.gold_factor_lab.swing_replay import replay as swing_replay
-from demos.gold_factor_lab.swing_v3 import PositionState, _promote_value_to_core, _standardised_observations, _trim_core, features as swing_v3_features, replay as swing_v3_replay
+from demos.gold_factor_lab.swing_v3 import PositionState, _promote_value_to_core, _standardised_observations, _trim_core, entry_kind as swing_v3_entry_kind, features as swing_v3_features, replay as swing_v3_replay
 from src.quant_research.contracts import BlindGoldAnalysisContext
 from src.quant_research.intelligence import analyse_blind_gold
 
@@ -276,12 +276,20 @@ def test_swing_v3_core_trim_keeps_half_the_position_and_records_fee():
 
 
 def test_swing_v3_value_layer_enters_a_stabilised_discount_without_price_constants():
-    prices = [100.0] * 120 + [98.0, 97.0, 97.2, 97.3, 97.4]
+    prices = [100.0] * 120 + [98.0, 97.0, 97.2, 97.3, 97.4, 97.5, 97.7, 97.9, 98.1]
     rows = _v3_rows(prices)
-    result = swing_v3_replay(rows, start=date.fromisoformat(rows[122]["observed_on"]), end=date.fromisoformat(rows[123]["observed_on"]), tool_url="unused", use_deepseek=False)
+    result = swing_v3_replay(rows, start=date.fromisoformat(rows[127]["observed_on"]), end=date.fromisoformat(rows[127]["observed_on"]), tool_url="unused", use_deepseek=False)
     value_trade = next(item for item in result["trades"] if item["action"] == "BUY_VALUE")
-    assert value_trade["price"] == rows[123]["price"]
+    assert value_trade["price"] == rows[128]["price"]
     assert value_trade["reason"] == "VALUATION_DISCOUNT_STABILISED"
+
+
+def test_swing_v3_blocks_entries_during_a_recent_downside_shock():
+    prices = [100 * 1.002 ** index for index in range(125)]
+    prices.extend([prices[-1] * 0.98, prices[-1] * 1.002])
+    feature = swing_v3_features(_v3_rows(prices))
+    assert feature["downside_shock_active"] is True
+    assert swing_v3_entry_kind(feature) == "none"
 
 
 def test_blind_gold_v3_context_forbids_dates_and_unknown_fields(monkeypatch):

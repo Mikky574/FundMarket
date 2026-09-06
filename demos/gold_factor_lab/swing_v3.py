@@ -53,6 +53,8 @@ class SwingV3Config:
     value_entry_z: float = -1.0
     value_add_z: float = -1.6
     value_reduce_z: float = 1.5
+    downside_shock_sigma: float = 1.75
+    shock_cooldown_sessions: int = 3
     minimum_trade_notional: float = 1_000.0
 
 
@@ -114,6 +116,8 @@ def features(history: list[dict], *, config: SwingV3Config = SwingV3Config()) ->
     resistance20, support20 = max(prices[-21:-1]), min(prices[-21:-1])
     valuation_center = statistics.median(prices[-config.valuation_lookback:])
     valuation_z = (price / valuation_center - 1) / volatility
+    recent_returns = [prices[index] / prices[index - 1] - 1 for index in range(max(1, len(prices) - config.shock_cooldown_sessions), len(prices))]
+    downside_shock_active = any(change <= -config.downside_shock_sigma * volatility for change in recent_returns)
     macro_score, macro_available, oil_risk, macro_labels = _macro_context(history)
     return {
         "price": price,
@@ -131,6 +135,8 @@ def features(history: list[dict], *, config: SwingV3Config = SwingV3Config()) ->
         "high10": max(prices[-11:-1]),
         "low5": min(prices[-6:-1]),
         "previous_price": prices[-2],
+        "short_trend_recovered": price > ema5 and prices[-2] > prior_ema5 and ema5 >= prior_ema5,
+        "downside_shock_active": downside_shock_active,
         "uptrend": price > ema20 > sma60 and ema20 > ema20_five_sessions_ago,
         "long_trend": price > sma60 and ema20 > sma60 and sma60 >= sma60_five_sessions_ago,
         "macro_score": macro_score,
@@ -142,7 +148,7 @@ def features(history: list[dict], *, config: SwingV3Config = SwingV3Config()) ->
 
 def entry_kind(feature: dict, *, config: SwingV3Config = SwingV3Config()) -> str:
     """Return a deterministic entry setup, never a model-created signal."""
-    if not feature["uptrend"]:
+    if not feature["uptrend"] or not feature["short_trend_recovered"] or feature["downside_shock_active"]:
         return "none"
     price, volatility = feature["price"], feature["volatility"]
     breakout = price / feature["resistance20"] - 1 >= config.breakout_sigma * volatility
@@ -381,9 +387,10 @@ def replay(rows: list[dict], *, start: date, end: date, tool_url: str,
         feature = features(history, config=config)
         candidate = entry_kind(feature, config=config)
         value_entry = (not state.value_grams and feature["valuation_z"] <= config.value_entry_z and
-                       feature["price"] >= feature["previous_price"])
+                       feature["short_trend_recovered"] and not feature["downside_shock_active"])
         value_add = (state.value_grams and feature["valuation_z"] <= config.value_add_z and
-                     feature["price"] < state.value_average_entry and feature["price"] >= feature["previous_price"])
+                     feature["price"] < state.value_average_entry and feature["short_trend_recovered"] and
+                     not feature["downside_shock_active"])
         value_exit = (state.value_grams and feature["valuation_z"] >= config.value_reduce_z and
                       feature["price"] < feature["ema5"])
         if state.core_grams:
@@ -427,7 +434,7 @@ def replay(rows: list[dict], *, start: date, end: date, tool_url: str,
             actions.append(("SELL_CORE", core_exit_reason, 0.0))
         elif core_trim_reason:
             actions.append(("TRIM_CORE", core_trim_reason, config.core_trim_fraction))
-        elif not state.core_grams and feature["long_trend"] and feature["valuation_z"] <= config.core_entry_valuation_z:
+        elif not state.core_grams and feature["long_trend"] and not feature["downside_shock_active"] and feature["valuation_z"] <= config.core_entry_valuation_z:
             actions.append(("BUY_CORE", "LONG_TREND_CORE_ALLOCATION", config.core_weight))
         if value_exit:
             actions.append(("SELL_VALUE", "VALUATION_PREMIUM_AND_SHORT_TREND_WEAKNESS", 0.0))
@@ -506,7 +513,8 @@ def replay(rows: list[dict], *, start: date, end: date, tool_url: str,
         "frozen_rule": {
             "core": "25% core allocation is built from existing low-valuation inventory after long-trend confirmation; cash may create it only at or below a modest valuation premium, one half may be realised at an extended premium plus short-trend weakness, and the remainder exits only after long-trend failure",
             "value": "15% value allocation opens after a stabilised discount below a 120-session median; one 15% add only at a deeper discount; it exits only when premium and short-trend weakness coincide",
-            "satellite_entry": "price > EMA20 > SMA60 with positive EMA20 slope, then either 20-session breakout >0.25 sigma or pullback reclaim",
+            "trend_safety": "a downside shock of 1.75 times 20-session volatility starts a three-session no-entry cooldown; after that, the latest two closes must both be above their EMA5 and EMA5 must be rising",
+            "satellite_entry": "after the trend-safety gate, price > EMA20 > SMA60 with positive EMA20 slope, then either 20-session breakout >0.25 sigma or pullback reclaim",
             "satellite_sizing": "35% initial satellite; adds only after a profitable 0.75-sigma move and then a supported breakout",
             "satellite_exit": "1.5-sigma initial stop, activated 2-sigma trailing stop, two closes below EMA20, trend failure, or 20-session no-progress de-risk",
             "model": "four specialised roles may cap size or hard-block only; no role can create an entry",
