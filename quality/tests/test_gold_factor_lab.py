@@ -30,6 +30,21 @@ def test_jd_collector_marks_history_as_known_only_at_retrieval(monkeypatch):
     assert row["available_at"] == received.isoformat()
 
 
+def test_public_collector_retries_one_transient_http_failure(monkeypatch):
+    class Response:
+        def raise_for_status(self): pass
+
+    calls = []
+    def get(*_args, **_kwargs):
+        calls.append(True)
+        if len(calls) == 1:
+            raise httpx.ConnectError("temporary disconnect")
+        return Response()
+    monkeypatch.setattr(collector.httpx, "get", get)
+    assert collector._request_with_retry("get", "https://example.invalid") is not None
+    assert len(calls) == 2
+
+
 def test_jd_history_accepts_six_month_period(monkeypatch):
     class Response:
         def raise_for_status(self): pass
@@ -341,6 +356,10 @@ def test_blind_gold_v3_context_forbids_dates_and_unknown_fields(monkeypatch):
     assert result["risk_severity"] == "mild"
     assert result["reason_codes"] == ["RESISTANCE_TOO_CLOSE"]
     assert "2026-" not in str(sent["json"])
+    prompt = sent["json"]["messages"][1]["content"]
+    assert '"evidence"' not in prompt
+    assert '"action"' not in prompt
+    assert sent["json"]["max_tokens"] == 220
     try:
         analyse_blind_gold([{"day": 1}], "cash", "HOLD", "trade_quality", {**context, "observed_on": "2026-01-01"})
     except ValueError:
@@ -361,3 +380,21 @@ def test_blind_gold_retries_one_malformed_model_json_response(monkeypatch):
     result = analyse_blind_gold([{"day": 1, "gold_index_base100": 100, "gold_return_1d_pct": 0}], "cash", "HOLD")
     assert result["action"] == "HOLD"
     assert result["risk_severity"] == "mild"
+
+
+def test_blind_gold_retries_one_transient_http_failure(monkeypatch):
+    class Response:
+        def raise_for_status(self): pass
+        def json(self): return {"choices": [{"message": {"content": '{"action":"HOLD","risk_severity":"none"}'}}]}
+
+    calls = []
+    def post(*_args, **_kwargs):
+        calls.append(True)
+        if len(calls) == 1:
+            raise httpx.ConnectError("temporary disconnect")
+        return Response()
+    monkeypatch.setattr("src.quant_research.intelligence._read_key", lambda: "test-key")
+    monkeypatch.setattr("src.quant_research.intelligence.httpx.post", post)
+    result = analyse_blind_gold([{"day": 1, "gold_index_base100": 100, "gold_return_1d_pct": 0}], "cash", "HOLD")
+    assert result["risk_severity"] == "none"
+    assert len(calls) == 2

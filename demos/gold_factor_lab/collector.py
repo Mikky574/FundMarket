@@ -45,6 +45,7 @@ class CollectionError(RuntimeError):
 
 
 HISTORY_PERIODS = {"m1", "m6", "y1"}
+MAX_HTTP_ATTEMPTS = 2
 
 
 def _now() -> datetime:
@@ -61,11 +62,23 @@ def _positive_decimal(value: object, field: str) -> float:
     return float(number)
 
 
+def _request_with_retry(method: str, url: str, **kwargs) -> httpx.Response:
+    """Retry a transient public-provider transport failure once, in memory."""
+    last_error: httpx.HTTPError | None = None
+    for _attempt in range(MAX_HTTP_ATTEMPTS):
+        try:
+            response = getattr(httpx, method)(url, **kwargs)
+            response.raise_for_status()
+            return response
+        except httpx.HTTPError as exc:
+            last_error = exc
+    raise CollectionError(f"public provider request failed after {MAX_HTTP_ATTEMPTS} attempts: {url}") from last_error
+
+
 def collect_jd_latest(*, retrieved_at: datetime | None = None) -> dict:
     """Fetch one exact current product quote without depending on app settings."""
     received = retrieved_at or _now()
-    response = httpx.get(JD_LATEST_URL, params={"productSku": JD_PRODUCT_SKU}, headers=HEADERS, timeout=20)
-    response.raise_for_status()
+    response = _request_with_retry("get", JD_LATEST_URL, params={"productSku": JD_PRODUCT_SKU}, headers=HEADERS, timeout=20)
     payload = response.json()
     item = payload.get("resultData", {}).get("datas", {}) if isinstance(payload, dict) else {}
     if not payload.get("success") or not isinstance(item, dict):
@@ -90,13 +103,11 @@ def collect_jd_history(*, period_type: str = "m1", retrieved_at: datetime | None
     if period_type not in HISTORY_PERIODS:
         raise ValueError(f"period_type must be one of {sorted(HISTORY_PERIODS)}")
     received = retrieved_at or _now()
-    response = httpx.post(
-        JD_MONTH_URL,
+    response = _request_with_retry("post", JD_MONTH_URL,
         json={"productSku": JD_PRODUCT_SKU, "periodType": period_type},
         headers=HEADERS,
         timeout=20,
     )
-    response.raise_for_status()
     payload = response.json()
     rows = payload.get("resultData", {}).get("data", {}).get("line", []) if isinstance(payload, dict) else []
     if not payload.get("success") or not isinstance(rows, list) or not rows:
@@ -135,13 +146,11 @@ def collect_jd_intraday(*, retrieved_at: datetime | None = None) -> list[dict]:
     minute-level research set; the demo deliberately keeps no local data.
     """
     received = retrieved_at or _now()
-    response = httpx.post(
-        JD_INTRADAY_URL,
+    response = _request_with_retry("post", JD_INTRADAY_URL,
         json={"appChannel": "11", "beginTime": "", "priceType": "buy", "productSku": JD_PRODUCT_SKU},
         headers=HEADERS,
         timeout=20,
     )
-    response.raise_for_status()
     payload = response.json()
     rows = payload.get("resultData", {}).get("data", {}).get("dataList", []) if isinstance(payload, dict) else []
     if not payload.get("success") or not isinstance(rows, list) or not rows:
@@ -171,13 +180,11 @@ def collect_fred_factor(name: str, fred_id: str, unit: str, invert: bool, *, sta
                         end: date, retrieved_at: datetime | None = None) -> list[dict]:
     """Fetch a daily FRED series without assuming its original release timestamp."""
     received = retrieved_at or _now()
-    response = httpx.get(
-        FRED_CSV_URL,
+    response = _request_with_retry("get", FRED_CSV_URL,
         params={"id": fred_id, "cos": start.isoformat(), "coe": end.isoformat()},
         headers=HEADERS,
         timeout=30,
     )
-    response.raise_for_status()
     reader = csv.DictReader(StringIO(response.text))
     output = []
     for row in reader:

@@ -416,6 +416,12 @@ def analyse_blind_gold(observations: list[dict], position: str, rule_candidate: 
         "trade_quality": "Act as a trade-odds analyst. Assess 5-10 session fee-adjusted upside, downside, and whether expected movement can plausibly clear the stated sell fee. Do not create a trade signal; rate the setup quality only.",
         "risk_skeptic": "Act as an independent risk skeptic. Seek falsifying evidence: resistance rejection, failed breakout, weakening momentum, macro conflict, and downside asymmetry. Classify risk severity; do not use ordinary uncertainty as a hard block.",
     }
+    role_output_contracts = {
+        "technical_breakout": '{"technical_regime":"breakout|trend_continuation|near_resistance|near_support|range|breakdown|uncertain","stance":"BULLISH|NEUTRAL|BEARISH","risk_severity":"none|mild|material|hard_block","reason_codes":["UPPERCASE_CODE"],"reason":"<=80 chars"}',
+        "macro_regime": '{"stance":"BULLISH|NEUTRAL|BEARISH","risk_severity":"none|mild|material|hard_block","reason_codes":["UPPERCASE_CODE"],"reason":"<=80 chars"}',
+        "trade_quality": '{"probability_net_gain_over_fee":0..1,"probability_material_loss":0..1,"expected_net_return_bucket":"above_1.2|0.4_to_1.2|minus_0.4_to_0.4|below_minus_0.4","risk_severity":"none|mild|material|hard_block","reason_codes":["UPPERCASE_CODE"],"reason":"<=80 chars"}',
+        "risk_skeptic": '{"risk_severity":"none|mild|material|hard_block","reason_codes":["UPPERCASE_CODE"],"invalidation_codes":["UPPERCASE_CODE"],"reason":"<=80 chars"}',
+    }
     if analysis_mode not in role_instructions:
         raise ValueError("invalid blind gold analysis mode")
     allowed = {"day", "gold_cny_per_gram", "gold_return_1d_pct", "usd_cny", "broad_us_dollar",
@@ -435,18 +441,24 @@ def analyse_blind_gold(observations: list[dict], position: str, rule_candidate: 
                 "position": position, "rule_candidate": rule_candidate, "analysis_mode": analysis_mode,
                 "recent_observations": observations, "analysis_context": context_payload}
     prompt = ("You are a constrained research classifier, not an investment adviser. Do not infer dates or request future data. " + role_instructions[analysis_mode] + " "
-              "Return only {\"next_day_direction\":\"UP|DOWN|FLAT\",\"direction_confidence\":0..1,\"horizon_5_10_direction\":\"UP|DOWN|FLAT\",\"horizon_confidence\":0..1,\"technical_regime\":\"breakout|trend_continuation|near_resistance|near_support|range|breakdown|uncertain\",\"action\":\"BUY|SELL|HOLD\",\"confidence\":0..1,\"stance\":\"BULLISH|NEUTRAL|BEARISH\",\"probability_net_gain_over_fee\":0..1,\"probability_material_loss\":0..1,\"expected_net_return_bucket\":\"above_1.2|0.4_to_1.2|minus_0.4_to_0.4|below_minus_0.4\",\"risk_severity\":\"none|mild|material|hard_block\",\"reason_codes\":[\"UPPERCASE_CODE\"],\"invalidation_codes\":[\"UPPERCASE_CODE\"],\"evidence\":[{\"feature\":\"FEATURE_CODE\",\"effect\":\"support|pressure|unknown\",\"strength\":-2..2}],\"reason\":\"under 160 chars\"}. "
-              "The legacy action is descriptive only; the deterministic replay owns execution. A bullish view is not automatically fee-covering or tradable. Use only this sequential feature evidence:\n" +
+              "Return exactly one compact valid JSON object matching this role contract: " + role_output_contracts[analysis_mode] + ". "
+              "Use no Markdown, no prose outside JSON, no evidence field, no action field, at most three reason codes, and one reason of at most 80 characters. "
+              "The deterministic replay owns execution; your output can only reduce risk. Use only this sequential feature evidence:\n" +
               json.dumps(evidence, ensure_ascii=False, separators=(",", ":")))
     request = {"model": "deepseek-v4-flash", "thinking": {"type": "disabled"}, "temperature": 0,
-               "response_format": {"type": "json_object"}, "max_tokens": 360,
+               "response_format": {"type": "json_object"}, "max_tokens": 220,
                "messages": [{"role": "system", "content": "Return valid JSON only."}, {"role": "user", "content": prompt}]}
     data: object = None
     for attempt in range(2):
-        response = httpx.post("https://api.deepseek.com/chat/completions", headers={"Authorization": f"Bearer {key}"},
-                              json=request, timeout=settings.market_intelligence_http_timeout_seconds)
-        response.raise_for_status()
-        content = response.json()["choices"][0]["message"].get("content") or "{}"
+        try:
+            response = httpx.post("https://api.deepseek.com/chat/completions", headers={"Authorization": f"Bearer {key}"},
+                                  json=request, timeout=settings.market_intelligence_http_timeout_seconds)
+            response.raise_for_status()
+            content = response.json()["choices"][0]["message"].get("content") or "{}"
+        except httpx.HTTPError as exc:
+            if attempt == 0:
+                continue
+            raise RuntimeError("DeepSeek request failed after one retry") from exc
         try:
             data = json.loads(content)
         except json.JSONDecodeError as exc:
