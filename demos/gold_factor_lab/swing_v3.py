@@ -429,6 +429,8 @@ def replay(rows: list[dict], *, start: date, end: date, tool_url: str,
                      not feature["downside_shock_active"])
         value_exit = (state.value_grams and feature["valuation_z"] >= config.value_reduce_z and
                       feature["price"] < feature["ema5"])
+        core_entry = (not state.core_grams and feature["long_trend"] and not feature["downside_shock_active"] and
+                      feature["valuation_z"] <= config.core_entry_valuation_z)
         if state.core_grams:
             state.below_sma60_streak = state.below_sma60_streak + 1 if feature["price"] < feature["sma60"] else 0
         if state.satellite_grams:
@@ -453,7 +455,8 @@ def replay(rows: list[dict], *, start: date, end: date, tool_url: str,
                 add_kind = "add_one"
             elif state.add_stage == 1 and candidate == "breakout" and feature["macro_score"] >= 1:
                 add_kind = "add_two"
-        setup_exists = (not state.satellite_grams and candidate != "none") or add_kind != "none"
+        satellite_setup = (not state.satellite_grams and candidate != "none") or add_kind != "none"
+        setup_exists = core_entry or value_entry or value_add or satellite_setup
         panel: dict[str, Decision] = {}
         context: dict | None = None
         if setup_exists:
@@ -470,17 +473,17 @@ def replay(rows: list[dict], *, start: date, end: date, tool_url: str,
             actions.append(("SELL_CORE", core_exit_reason, 0.0))
         elif core_trim_reason:
             actions.append(("TRIM_CORE", core_trim_reason, config.core_trim_fraction))
-        elif not state.core_grams and feature["long_trend"] and not feature["downside_shock_active"] and feature["valuation_z"] <= config.core_entry_valuation_z:
-            actions.append(("BUY_CORE", "LONG_TREND_CORE_ALLOCATION", config.core_weight))
+        elif core_entry and not fusion["hard_block"]:
+            actions.append(("BUY_CORE", "LONG_TREND_CORE_ALLOCATION", config.core_weight * fusion["multiplier"]))
         if value_exit:
             actions.append(("SELL_VALUE", "VALUATION_PREMIUM_AND_SHORT_TREND_WEAKNESS", 0.0))
-        elif value_entry:
-            actions.append(("BUY_VALUE", "VALUATION_DISCOUNT_STABILISED", config.value_initial_weight))
-        elif value_add:
-            actions.append(("ADD_VALUE", "DEEPER_VALUATION_DISCOUNT_STABILISED", config.value_initial_weight + config.value_add_weight))
+        elif value_entry and not fusion["hard_block"]:
+            actions.append(("BUY_VALUE", "VALUATION_DISCOUNT_STABILISED", config.value_initial_weight * fusion["multiplier"]))
+        elif value_add and not fusion["hard_block"]:
+            actions.append(("ADD_VALUE", "DEEPER_VALUATION_DISCOUNT_STABILISED", (config.value_initial_weight + config.value_add_weight) * fusion["multiplier"]))
         if satellite_exit_reason:
             actions.append(("SELL_SATELLITE", satellite_exit_reason, 0.0))
-        elif setup_exists and not fusion["hard_block"]:
+        elif satellite_setup and not fusion["hard_block"]:
             if not state.satellite_grams:
                 actions.append(("BUY_SATELLITE", candidate.upper(), config.satellite_initial_weight * macro_multiplier * fusion["multiplier"]))
             elif add_kind == "add_one":
@@ -490,7 +493,7 @@ def replay(rows: list[dict], *, start: date, end: date, tool_url: str,
                 satellite_cap = max(0.0, 1.0 - config.core_weight - _layer_weight(state, "value", feature["price"]))
                 actions.append(("ADD_SATELLITE_TWO", "BREAKOUT_AFTER_PROFIT", min(1.0 - config.core_weight,
                                                                                        satellite_cap, config.satellite_initial_weight + config.satellite_add_one_weight + config.satellite_add_two_weight * fusion["multiplier"])))
-        elif setup_exists and fusion["hard_block"]:
+        if setup_exists and fusion["hard_block"] and not actions:
             actions.append(("HOLD", "MODEL_HARD_BLOCK", _position_weight(state, feature["price"])))
         fill_price = float(fill["price"])
         executed = []

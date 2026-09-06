@@ -301,6 +301,17 @@ def test_swing_v3_value_layer_enters_a_stabilised_discount_without_price_constan
     assert value_trade["reason"] == "VALUATION_DISCOUNT_STABILISED"
 
 
+def test_swing_v3_model_hard_block_prevents_a_value_entry():
+    prices = [100.0] * 120 + [98.0, 97.0, 97.2, 97.3, 97.4, 97.5, 97.7, 97.9, 98.1]
+    rows = _v3_rows(prices)
+    result = swing_v3_replay(
+        rows, start=date.fromisoformat(rows[127]["observed_on"]), end=date.fromisoformat(rows[128]["observed_on"]), tool_url="unused", use_deepseek=False,
+        panel_provider=lambda *_args: {"risk_skeptic": Decision("HOLD", 0.5, "blocked", "test", risk_severity="hard_block")},
+    )
+    assert not any(item["action"] == "BUY_VALUE" for item in result["trades"])
+    assert result["model_review"]["hard_blocks"] == 1
+
+
 def test_swing_v3_blocks_entries_during_a_recent_downside_shock():
     prices = [100 * 1.002 ** index for index in range(125)]
     prices.extend([prices[-1] * 0.98, prices[-1] * 1.002])
