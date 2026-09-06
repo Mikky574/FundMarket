@@ -222,9 +222,8 @@ def test_swing_replay_uses_partial_entry_and_sell_fee():
              "us_10y_real_yield": 2, "wti_crude": 70} for day in range(1, 29)]
     result = swing_replay(rows, start=date(2026, 1, 21), end=date(2026, 1, 27), tool_url="unused", use_deepseek=False)
     assert any(item["action"] == "BUY_50" for item in result["trades"])
-    assert result["terminal_exit_fee"] > 0
-    assert result["final_value"] == round(result["mark_to_market_value"] - result["terminal_exit_fee"], 2)
-    assert result["fees_paid"] >= result["terminal_exit_fee"]
+    assert result["terminal_exit_fee"] == 0
+    assert result["final_value"] == result["mark_to_market_value"]
 
 
 def _v3_rows(prices: list[float]) -> list[dict]:
@@ -247,9 +246,8 @@ def test_swing_v3_accrues_terminal_sell_fee_and_uses_next_quote():
     assert not any(item["action"] == "BUY_CORE" for item in result["trades"])
     assert result["trades"][0]["signal_day"] == rows[120]["observed_on"]
     assert result["trades"][0]["fill_day"] == rows[121]["observed_on"]
-    assert result["terminal_exit_fee"] > 0
-    assert result["final_value"] == round(result["mark_to_market_value"] - result["terminal_exit_fee"], 2)
-    assert result["fees_paid"] >= result["terminal_exit_fee"]
+    assert result["terminal_exit_fee"] == 0
+    assert result["final_value"] == result["mark_to_market_value"]
 
 
 def test_swing_v3_features_and_model_window_do_not_use_future_rows():

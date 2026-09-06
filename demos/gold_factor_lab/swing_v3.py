@@ -545,10 +545,13 @@ def replay(rows: list[dict], *, start: date, end: date, tool_url: str,
         raise ValueError("no eligible signal sessions in the requested period")
     last_price = float(rows[last_evaluation_index]["price"])
     mark_to_market_value = state.cash + _total_grams(state) * last_price
-    terminal_exit_fee = _total_grams(state) * last_price * config.sell_fee if _total_grams(state) else 0.0
-    final_value = mark_to_market_value - terminal_exit_fee
+    # The research period ending is not a trade instruction. Open gold is
+    # therefore carried at its observed market value without inventing a sale
+    # or charging a hypothetical redemption fee.
+    terminal_exit_fee = 0.0
+    final_value = mark_to_market_value
     benchmark_entry = float(rows[first_signal_index + 1]["price"])
-    buy_hold_value = INITIAL_CASH / benchmark_entry * last_price * (1 - config.sell_fee)
+    buy_hold_value = INITIAL_CASH / benchmark_entry * last_price
     realized_fees = sum(float(trade["fee"]) for trade in trades)
     model_fusions = [event["model_fusion"] for event in events if event["analyses"]]
     model_review = {
@@ -568,7 +571,7 @@ def replay(rows: list[dict], *, start: date, end: date, tool_url: str,
         "strategy": "swing_v3_core_satellite_volatility_targeted",
         "target_period": {"start": start.isoformat(), "end": end.isoformat()},
         "contract": {"signal": "daily close", "execution": "next observed daily quote", "buy_fee_rate": 0.0,
-                     "sell_fee_rate": config.sell_fee, "terminal_valuation": "net liquidation at final observed quote"},
+                     "sell_fee_rate": config.sell_fee, "terminal_valuation": "mark-to-market at final observed quote; no hypothetical sale"},
         "frozen_rule": {
             "core": "25% core allocation is built from existing low-valuation inventory after long-trend confirmation; cash may create it only at or below a modest valuation premium, one half may be realised at an extended premium plus short-trend weakness, and the remainder exits only after long-trend failure",
             "value": "15% value allocation opens after a stabilised discount below a 120-session median; one 15% add only at a deeper discount; it exits only when premium and short-trend weakness coincide",
@@ -582,7 +585,7 @@ def replay(rows: list[dict], *, start: date, end: date, tool_url: str,
         "initial_cash": INITIAL_CASH,
         "final_value": round(final_value, 2),
         "mark_to_market_value": round(mark_to_market_value, 2),
-        "terminal_exit_fee": round(terminal_exit_fee, 2),
+        "terminal_exit_fee": 0.0,
         "open_core_grams": round(state.core_grams, 8),
         "open_value_grams": round(state.value_grams, 8),
         "open_satellite_grams": round(state.satellite_grams, 8),
@@ -591,7 +594,7 @@ def replay(rows: list[dict], *, start: date, end: date, tool_url: str,
         "buy_and_hold_return_percent": round((buy_hold_value / INITIAL_CASH - 1) * 100, 3),
         "trade_count": len(trades),
         "realized_fees_paid": round(realized_fees, 2),
-        "fees_paid": round(realized_fees + terminal_exit_fee, 2),
+        "fees_paid": round(realized_fees, 2),
         "model_calls": model_calls,
         "model_review": model_review,
         "trades": trades,
