@@ -54,7 +54,10 @@ def _panel_allows_entry(panel: dict[str, Decision]) -> tuple[bool, bool]:
     return support and not skeptic_blocks, skeptic_blocks
 
 
-def replay(rows: list[dict], *, start: date, end: date, tool_url: str, use_deepseek: bool = True) -> dict:
+def replay(rows: list[dict], *, start: date, end: date, tool_url: str, use_deepseek: bool = False) -> dict:
+    """Run the deterministic legacy replay; DeepSeek is explanation-only."""
+    if use_deepseek:
+        raise ValueError("DeepSeek is explanation-only and cannot participate in swing replay decisions")
     cash, grams, held_days, added = INITIAL_CASH, 0.0, 0, False
     trades, events, model_calls = [], [], 0
     for index in range(20, len(rows) - 1):
@@ -115,7 +118,7 @@ def replay(rows: list[dict], *, start: date, end: date, tool_url: str, use_deeps
     first_index = next(i for i, row in enumerate(rows) if date.fromisoformat(row["observed_on"]) >= start)
     buy_hold = INITIAL_CASH / float(rows[first_index]["price"]) * float(rows[-1]["price"]) * (1 - SELL_FEE)
     return {"strategy": "swing_v1_trend_5_to_10_sessions", "target_period": {"start": start.isoformat(), "end": end.isoformat()},
-            "rule": {"entry": "trend continuation or >0.3% close above prior 20-session resistance; macro score>=0 when available", "sizing": "50% initial, one 25% add after 3 sessions only after three-role consensus", "exit": "after 5 sessions on close below SMA10/macro<=-2, mandatory exit by 15 sessions", "model": "technical role needs 5-10 session UP >=0.60; macro cannot be DOWN; skeptic blocks SELL/DOWN >=0.55 or unconfirmed near-resistance/breakdown", "fee": "buy 0%; sell 0.4%"},
+            "rule": {"entry": "trend continuation or >0.3% close above prior 20-session resistance; macro score>=0 when available", "sizing": "50% initial, one 25% add after 3 sessions", "exit": "after 5 sessions on close below SMA10/macro<=-2, mandatory exit by 15 sessions", "model": "DeepSeek is explanation-only and excluded from all decision and sizing paths", "fee": "buy 0%; sell 0.4%"},
             "initial_cash": INITIAL_CASH, "final_value": round(final_value, 2), "mark_to_market_value": round(mark_to_market_value, 2),
             "terminal_exit_fee": round(terminal_exit_fee, 2), "open_grams": round(grams, 8), "return_percent": round((final_value / INITIAL_CASH - 1) * 100, 3),
             "buy_and_hold_return_percent": round((buy_hold / INITIAL_CASH - 1) * 100, 3), "trade_count": len(trades), "realized_fees_paid": round(sum(t["fee"] for t in trades), 2),
@@ -132,7 +135,7 @@ def main() -> None:
     parser.add_argument("--tool-url", default="http://127.0.0.1:8000/api/v1/internal/research/gold-blind-decision")
     args = parser.parse_args()
     panel = collect_factor_panel(start=args.start - timedelta(days=80), end=args.end)
-    result = replay(_daily_rows(panel), start=args.start, end=args.end, tool_url=args.tool_url, use_deepseek=not args.no_deepseek)
+    result = replay(_daily_rows(panel), start=args.start, end=args.end, tool_url=args.tool_url, use_deepseek=False)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     print(args.output.resolve())

@@ -396,11 +396,17 @@ def _promote_value_to_core(state: PositionState, *, price: float, target_weight:
 
 
 def replay(rows: list[dict], *, start: date, end: date, tool_url: str,
-           use_deepseek: bool = True, panel_provider: PanelProvider | None = None,
+           use_deepseek: bool = False, panel_provider: PanelProvider | None = None,
            config: SwingV3Config = SwingV3Config()) -> dict:
-    """Replay core plus satellite decisions, filled at the next observed quote."""
+    """Replay deterministic core plus satellite decisions, filled at the next quote.
+
+    DeepSeek is intentionally excluded from this decision path. It remains a
+    separate explanation capability for QQ and dashboard conversations.
+    """
     if start > end:
         raise ValueError("start must not be after end")
+    if use_deepseek or panel_provider is not None:
+        raise ValueError("DeepSeek review is explanation-only and cannot participate in swing-v3 decisions")
     if len(rows) < config.warmup_sessions + 2:
         raise ValueError("not enough daily rows for swing-v3 warm-up and next-quote fills")
     eligible_row_indexes = [
@@ -546,7 +552,8 @@ def replay(rows: list[dict], *, start: date, end: date, tool_url: str,
     realized_fees = sum(float(trade["fee"]) for trade in trades)
     model_fusions = [event["model_fusion"] for event in events if event["analyses"]]
     model_review = {
-        "enabled": use_deepseek or panel_provider is not None,
+        "enabled": False,
+        "mode": "explanation_only",
         "candidate_reviews": len(model_fusions),
         "role_calls": model_calls,
         "hard_blocks": sum(1 for fusion in model_fusions if fusion["hard_block"]),
@@ -569,7 +576,7 @@ def replay(rows: list[dict], *, start: date, end: date, tool_url: str,
             "satellite_entry": "after the trend-safety gate, price > EMA20 > SMA60 with positive EMA20 slope, then either 20-session breakout >0.25 sigma or pullback reclaim",
             "satellite_sizing": "35% initial satellite; adds only after a profitable 0.75-sigma move and then a supported breakout",
             "satellite_exit": "1.5-sigma initial stop, activated 2-sigma trailing stop, two closes below EMA20, trend failure, or 20-session no-progress de-risk",
-            "model": "four specialised roles may cap size or hard-block only; no role can create an entry",
+            "model": "DeepSeek is explanation-only; it cannot influence entries, exits, or position sizing",
             "macro": "macro context multiplies target weight (50/75/100%) rather than vetoing a technical setup",
         },
         "initial_cash": INITIAL_CASH,
@@ -606,7 +613,7 @@ def main() -> None:
     parser.add_argument("--tool-url", default="http://127.0.0.1:8000/api/v1/internal/research/gold-blind-decision")
     args = parser.parse_args()
     panel = collect_factor_panel(start=args.start - timedelta(days=400), end=args.end)
-    result = replay(_daily_rows(panel), start=args.start, end=args.end, tool_url=args.tool_url, use_deepseek=not args.no_deepseek)
+    result = replay(_daily_rows(panel), start=args.start, end=args.end, tool_url=args.tool_url, use_deepseek=False)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     print(args.output.resolve())

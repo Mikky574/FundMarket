@@ -10,7 +10,7 @@ from tools.deepseek_blind_gold_tool import invoke
 from demos.gold_factor_lab.factor_calibration import calibrate
 from demos.gold_factor_lab.evaluation_report import build_html as build_evaluation_html
 from demos.gold_factor_lab.swing_replay import replay as swing_replay
-from demos.gold_factor_lab.swing_v3 import PositionState, SwingV3Config, _fuse_panel, _model_panel, _promote_value_to_core, _standardised_observations, _trim_core, entry_kind as swing_v3_entry_kind, features as swing_v3_features, replay as swing_v3_replay
+from demos.gold_factor_lab.swing_v3 import PositionState, _promote_value_to_core, _standardised_observations, _trim_core, entry_kind as swing_v3_entry_kind, features as swing_v3_features, replay as swing_v3_replay
 from src.quant_research.contracts import BlindGoldAnalysisContext
 from src.quant_research.intelligence import analyse_blind_gold
 
@@ -301,15 +301,15 @@ def test_swing_v3_value_layer_enters_a_stabilised_discount_without_price_constan
     assert value_trade["reason"] == "VALUATION_DISCOUNT_STABILISED"
 
 
-def test_swing_v3_model_hard_block_prevents_a_value_entry():
+def test_swing_v3_rejects_model_participation_in_trade_decisions():
     prices = [100.0] * 120 + [98.0, 97.0, 97.2, 97.3, 97.4, 97.5, 97.7, 97.9, 98.1]
     rows = _v3_rows(prices)
-    result = swing_v3_replay(
-        rows, start=date.fromisoformat(rows[127]["observed_on"]), end=date.fromisoformat(rows[128]["observed_on"]), tool_url="unused", use_deepseek=False,
-        panel_provider=lambda *_args: {"risk_skeptic": Decision("HOLD", 0.5, "blocked", "test", risk_severity="hard_block")},
-    )
-    assert not any(item["action"] == "BUY_VALUE" for item in result["trades"])
-    assert result["model_review"]["hard_blocks"] == 1
+    try:
+        swing_v3_replay(rows, start=date.fromisoformat(rows[127]["observed_on"]), end=date.fromisoformat(rows[128]["observed_on"]), tool_url="unused", use_deepseek=True)
+    except ValueError as exc:
+        assert "explanation-only" in str(exc)
+    else:
+        raise AssertionError("swing-v3 accepted a model decision path")
 
 
 def test_swing_v3_blocks_entries_during_a_recent_downside_shock():
@@ -327,27 +327,6 @@ def test_swing_v3_terminal_value_does_not_use_prices_after_the_requested_end():
     future_inclusive = swing_v3_replay(rows, start=date.fromisoformat(rows[120]["observed_on"]), end=end, tool_url="unused", use_deepseek=False)
     assert future_inclusive["final_value"] == bounded["final_value"]
     assert future_inclusive["buy_and_hold_final_value"] == bounded["buy_and_hold_final_value"]
-
-
-def test_swing_v3_model_panel_can_reduce_risk_but_only_skeptic_can_block():
-    bearish_technical = Decision("HOLD", 0.4, "breakdown", "test", technical_regime="breakdown", stance="BEARISH")
-    neutral_skeptic = Decision("HOLD", 0.4, "no hard block", "test", risk_severity="none")
-    fusion = _fuse_panel({"technical_breakout": bearish_technical, "risk_skeptic": neutral_skeptic})
-    assert fusion["multiplier"] == 0.5
-    assert fusion["hard_block"] is False
-    assert fusion["role_caps"]["technical_breakout"] == 0.5
-    blocked = _fuse_panel({"risk_skeptic": Decision("HOLD", 0.4, "block", "test", risk_severity="hard_block")})
-    assert blocked["hard_block"] is True
-    assert blocked["multiplier"] == 0.0
-
-
-def test_swing_v3_blocks_a_candidate_when_model_review_is_unavailable(monkeypatch):
-    rows = _v3_rows([100 * 1.002 ** index for index in range(130)])
-    history = rows[:121]
-    monkeypatch.setattr("demos.gold_factor_lab.swing_v3.local_tool_decision", lambda *_args, **_kwargs: (_ for _ in ()).throw(httpx.ConnectError("offline")))
-    panel = _model_panel(history, swing_v3_features(history), PositionState(cash=100_000), stage="entry", candidate="breakout", tool_url="unused", config=SwingV3Config())
-    assert panel["risk_skeptic"].risk_severity == "hard_block"
-    assert panel["risk_skeptic"].reason_codes == ("MODEL_REVIEW_UNAVAILABLE",)
 
 
 def test_blind_gold_v3_context_forbids_dates_and_unknown_fields(monkeypatch):
