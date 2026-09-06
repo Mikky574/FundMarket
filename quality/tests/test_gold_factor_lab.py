@@ -1,5 +1,7 @@
 from datetime import date, datetime, timedelta, timezone
 
+import httpx
+
 from demos.gold_factor_lab.analysis import describe
 from demos.gold_factor_lab import collector
 from demos.gold_factor_lab.history_chart import build_html
@@ -8,7 +10,7 @@ from tools.deepseek_blind_gold_tool import invoke
 from demos.gold_factor_lab.factor_calibration import calibrate
 from demos.gold_factor_lab.evaluation_report import build_html as build_evaluation_html
 from demos.gold_factor_lab.swing_replay import replay as swing_replay
-from demos.gold_factor_lab.swing_v3 import PositionState, _promote_value_to_core, _standardised_observations, _trim_core, entry_kind as swing_v3_entry_kind, features as swing_v3_features, replay as swing_v3_replay
+from demos.gold_factor_lab.swing_v3 import PositionState, SwingV3Config, _fuse_panel, _model_panel, _promote_value_to_core, _standardised_observations, _trim_core, entry_kind as swing_v3_entry_kind, features as swing_v3_features, replay as swing_v3_replay
 from src.quant_research.contracts import BlindGoldAnalysisContext
 from src.quant_research.intelligence import analyse_blind_gold
 
@@ -301,6 +303,27 @@ def test_swing_v3_terminal_value_does_not_use_prices_after_the_requested_end():
     assert future_inclusive["buy_and_hold_final_value"] == bounded["buy_and_hold_final_value"]
 
 
+def test_swing_v3_model_panel_can_reduce_risk_but_only_skeptic_can_block():
+    bearish_technical = Decision("HOLD", 0.4, "breakdown", "test", technical_regime="breakdown", stance="BEARISH")
+    neutral_skeptic = Decision("HOLD", 0.4, "no hard block", "test", risk_severity="none")
+    fusion = _fuse_panel({"technical_breakout": bearish_technical, "risk_skeptic": neutral_skeptic})
+    assert fusion["multiplier"] == 0.5
+    assert fusion["hard_block"] is False
+    assert fusion["role_caps"]["technical_breakout"] == 0.5
+    blocked = _fuse_panel({"risk_skeptic": Decision("HOLD", 0.4, "block", "test", risk_severity="hard_block")})
+    assert blocked["hard_block"] is True
+    assert blocked["multiplier"] == 0.0
+
+
+def test_swing_v3_blocks_a_candidate_when_model_review_is_unavailable(monkeypatch):
+    rows = _v3_rows([100 * 1.002 ** index for index in range(130)])
+    history = rows[:121]
+    monkeypatch.setattr("demos.gold_factor_lab.swing_v3.local_tool_decision", lambda *_args, **_kwargs: (_ for _ in ()).throw(httpx.ConnectError("offline")))
+    panel = _model_panel(history, swing_v3_features(history), PositionState(cash=100_000), stage="entry", candidate="breakout", tool_url="unused", config=SwingV3Config())
+    assert panel["risk_skeptic"].risk_severity == "hard_block"
+    assert panel["risk_skeptic"].reason_codes == ("MODEL_REVIEW_UNAVAILABLE",)
+
+
 def test_blind_gold_v3_context_forbids_dates_and_unknown_fields(monkeypatch):
     class Response:
         def raise_for_status(self): pass
@@ -324,3 +347,17 @@ def test_blind_gold_v3_context_forbids_dates_and_unknown_fields(monkeypatch):
         pass
     else:
         raise AssertionError("the feature-only context accepted a calendar field")
+
+
+def test_blind_gold_retries_one_malformed_model_json_response(monkeypatch):
+    class Response:
+        def __init__(self, content): self.content = content
+        def raise_for_status(self): pass
+        def json(self): return {"choices": [{"message": {"content": self.content}}]}
+
+    responses = iter((Response('{"action":"HOLD"'), Response('{"action":"HOLD","risk_severity":"mild"}')))
+    monkeypatch.setattr("src.quant_research.intelligence._read_key", lambda: "test-key")
+    monkeypatch.setattr("src.quant_research.intelligence.httpx.post", lambda *_args, **_kwargs: next(responses))
+    result = analyse_blind_gold([{"day": 1, "gold_index_base100": 100, "gold_return_1d_pct": 0}], "cash", "HOLD")
+    assert result["action"] == "HOLD"
+    assert result["risk_severity"] == "mild"

@@ -438,13 +438,22 @@ def analyse_blind_gold(observations: list[dict], position: str, rule_candidate: 
               "Return only {\"next_day_direction\":\"UP|DOWN|FLAT\",\"direction_confidence\":0..1,\"horizon_5_10_direction\":\"UP|DOWN|FLAT\",\"horizon_confidence\":0..1,\"technical_regime\":\"breakout|trend_continuation|near_resistance|near_support|range|breakdown|uncertain\",\"action\":\"BUY|SELL|HOLD\",\"confidence\":0..1,\"stance\":\"BULLISH|NEUTRAL|BEARISH\",\"probability_net_gain_over_fee\":0..1,\"probability_material_loss\":0..1,\"expected_net_return_bucket\":\"above_1.2|0.4_to_1.2|minus_0.4_to_0.4|below_minus_0.4\",\"risk_severity\":\"none|mild|material|hard_block\",\"reason_codes\":[\"UPPERCASE_CODE\"],\"invalidation_codes\":[\"UPPERCASE_CODE\"],\"evidence\":[{\"feature\":\"FEATURE_CODE\",\"effect\":\"support|pressure|unknown\",\"strength\":-2..2}],\"reason\":\"under 160 chars\"}. "
               "The legacy action is descriptive only; the deterministic replay owns execution. A bullish view is not automatically fee-covering or tradable. Use only this sequential feature evidence:\n" +
               json.dumps(evidence, ensure_ascii=False, separators=(",", ":")))
-    response = httpx.post("https://api.deepseek.com/chat/completions", headers={"Authorization": f"Bearer {key}"},
-                          json={"model": "deepseek-v4-flash", "thinking": {"type": "disabled"}, "temperature": 0,
-                                "response_format": {"type": "json_object"}, "max_tokens": 360,
-                                "messages": [{"role": "system", "content": "Return valid JSON only."}, {"role": "user", "content": prompt}]},
-                          timeout=settings.market_intelligence_http_timeout_seconds)
-    response.raise_for_status()
-    data = json.loads(response.json()["choices"][0]["message"].get("content") or "{}")
+    request = {"model": "deepseek-v4-flash", "thinking": {"type": "disabled"}, "temperature": 0,
+               "response_format": {"type": "json_object"}, "max_tokens": 360,
+               "messages": [{"role": "system", "content": "Return valid JSON only."}, {"role": "user", "content": prompt}]}
+    data: object = None
+    for attempt in range(2):
+        response = httpx.post("https://api.deepseek.com/chat/completions", headers={"Authorization": f"Bearer {key}"},
+                              json=request, timeout=settings.market_intelligence_http_timeout_seconds)
+        response.raise_for_status()
+        content = response.json()["choices"][0]["message"].get("content") or "{}"
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError as exc:
+            if attempt == 0:
+                continue
+            raise RuntimeError("DeepSeek returned invalid JSON after one retry") from exc
+        break
     if not isinstance(data, dict):
         data = {}
     action = _enum(data.get("action"), {"BUY", "SELL", "HOLD"}, "HOLD")

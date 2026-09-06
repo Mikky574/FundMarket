@@ -11,10 +11,13 @@ import argparse
 import json
 import statistics
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Callable
+
+import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -233,38 +236,64 @@ def _model_panel(history: list[dict], feature: dict, state: PositionState, *, st
     neutral_rule = Decision("HOLD", 0.0, "deterministic swing-v3 candidate", "swing_v3")
     context = analysis_context(history, feature, state, stage=stage, candidate=candidate, config=config)
     observations = _standardised_observations(history)
-    return {
-        mode: local_tool_decision(
-            history,
-            in_position=_total_grams(state) > 0,
-            rule=neutral_rule,
-            tool_url=tool_url,
-            analysis_mode=mode,
-            analysis_context=context,
-            observations=observations,
-        )
-        for mode in ("technical_breakout", "macro_regime", "trade_quality", "risk_skeptic")
-    }
+    modes = ("technical_breakout", "macro_regime", "trade_quality", "risk_skeptic")
+    try:
+        with ThreadPoolExecutor(max_workers=len(modes)) as executor:
+            futures = {
+                mode: executor.submit(
+                    local_tool_decision,
+                    history,
+                    in_position=_total_grams(state) > 0,
+                    rule=neutral_rule,
+                    tool_url=tool_url,
+                    analysis_mode=mode,
+                    analysis_context=context,
+                    observations=observations,
+                )
+                for mode in modes
+            }
+            panel = {mode: futures[mode].result() for mode in modes}
+    except (httpx.HTTPError, RuntimeError, ValueError):
+        # A partial panel must never be interpreted as approval.  The risk
+        # layer blocks the candidate and records the provider failure.
+        return {
+            mode: Decision("HOLD", 0.0, "model review unavailable", "model_fallback",
+                           risk_severity="hard_block" if mode == "risk_skeptic" else "material",
+                           reason_codes=("MODEL_REVIEW_UNAVAILABLE",))
+            for mode in modes
+        }
+    return panel
 
 
 def _fuse_panel(panel: dict[str, Decision]) -> dict:
     """Translate model risk into a cap; it can never create an entry."""
     if not panel:
-        return {"multiplier": 1.0, "hard_block": False, "reason_codes": []}
+        return {"multiplier": 1.0, "hard_block": False, "reason_codes": [], "role_caps": {}}
     skeptic = panel.get("risk_skeptic", Decision("HOLD", 0, "missing skeptic", "fallback"))
     multiplier = {"none": 1.0, "mild": 0.75, "material": 0.50, "hard_block": 0.0}.get(skeptic.risk_severity, 0.50)
+    role_caps = {"risk_skeptic": multiplier}
+    technical = panel.get("technical_breakout")
+    if technical and (technical.technical_regime == "breakdown" or technical.stance == "BEARISH"):
+        role_caps["technical_breakout"] = 0.50
+        multiplier = min(multiplier, 0.50)
+    macro = panel.get("macro_regime")
+    if macro and macro.stance == "BEARISH":
+        role_caps["macro_regime"] = 0.75
+        multiplier = min(multiplier, 0.75)
     odds = panel.get("trade_quality")
     if odds:
         if odds.probability_net_gain_over_fee < 0.45 or odds.expected_net_return_bucket == "below_minus_0.4":
+            role_caps["trade_quality"] = 0.50
             multiplier = min(multiplier, 0.50)
         elif odds.probability_net_gain_over_fee < 0.55:
+            role_caps["trade_quality"] = 0.75
             multiplier = min(multiplier, 0.75)
     reason_codes = []
     for decision in panel.values():
         for code in decision.reason_codes:
             if code not in reason_codes:
                 reason_codes.append(code)
-    return {"multiplier": multiplier, "hard_block": skeptic.risk_severity == "hard_block", "reason_codes": reason_codes[:12]}
+    return {"multiplier": multiplier, "hard_block": skeptic.risk_severity == "hard_block", "reason_codes": reason_codes[:12], "role_caps": role_caps}
 
 
 def _analysis_audit(panel: dict[str, Decision]) -> dict:
@@ -512,6 +541,19 @@ def replay(rows: list[dict], *, start: date, end: date, tool_url: str,
     benchmark_entry = float(rows[first_signal_index + 1]["price"])
     buy_hold_value = INITIAL_CASH / benchmark_entry * last_price * (1 - config.sell_fee)
     realized_fees = sum(float(trade["fee"]) for trade in trades)
+    model_fusions = [event["model_fusion"] for event in events if event["analyses"]]
+    model_review = {
+        "enabled": use_deepseek or panel_provider is not None,
+        "candidate_reviews": len(model_fusions),
+        "role_calls": model_calls,
+        "hard_blocks": sum(1 for fusion in model_fusions if fusion["hard_block"]),
+        "size_reductions": sum(1 for fusion in model_fusions if 0 < fusion["multiplier"] < 1),
+        "full_size_approvals": sum(1 for fusion in model_fusions if fusion["multiplier"] == 1),
+        "provider_unavailable_blocks": sum(
+            1 for event in events
+            if event["analyses"] and event["analyses"].get("risk_skeptic", {}).get("reason_codes") == ["MODEL_REVIEW_UNAVAILABLE"]
+        ),
+    }
     return {
         "strategy": "swing_v3_core_satellite_volatility_targeted",
         "target_period": {"start": start.isoformat(), "end": end.isoformat()},
@@ -541,6 +583,7 @@ def replay(rows: list[dict], *, start: date, end: date, tool_url: str,
         "realized_fees_paid": round(realized_fees, 2),
         "fees_paid": round(realized_fees + terminal_exit_fee, 2),
         "model_calls": model_calls,
+        "model_review": model_review,
         "trades": trades,
         "events": events,
         "limitations": [
