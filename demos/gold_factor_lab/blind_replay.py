@@ -85,20 +85,6 @@ def _macro_context(history: list[dict]) -> tuple[int, int, bool, list[str]]:
     return score, available, oil_risk, labels
 
 
-def _technical_context(history: list[dict]) -> dict[str, float | None]:
-    """Compute date-free support, resistance and trend features for the LLM."""
-    prices = [float(row["price"]) for row in history]
-    if len(prices) < 21:
-        return {"sma5": None, "sma20": None, "momentum5_pct": None, "momentum20_pct": None,
-                "distance_to_resistance20_pct": None, "distance_to_support20_pct": None}
-    resistance, support = max(prices[-21:-1]), min(prices[-21:-1])
-    return {"sma5": round(_sma(prices, 5), 4), "sma20": round(_sma(prices, 20), 4),
-            "momentum5_pct": round((prices[-1] / prices[-6] - 1) * 100, 3),
-            "momentum20_pct": round((prices[-1] / prices[-21] - 1) * 100, 3),
-            "distance_to_resistance20_pct": round((prices[-1] / resistance - 1) * 100, 3),
-            "distance_to_support20_pct": round((prices[-1] / support - 1) * 100, 3)}
-
-
 def rule_decision(history: list[dict], *, in_position: bool, held_days: int, cooldown_days: int) -> Decision:
     """A conservative, fee-aware trend rule with hysteresis.
 

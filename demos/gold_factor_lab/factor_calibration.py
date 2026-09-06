@@ -1,8 +1,8 @@
 """Development-only factor calibration for the gold replay rule.
 
-It does not fit or alter DeepSeek.  It measures a small, predeclared set of
-macro contexts on a designated development period, then records whether there
-is enough evidence to keep each context as a gate before an untouched holdout.
+It measures a small, predeclared set of macro contexts on a designated
+development period, then records whether there is enough evidence to keep each
+context as a gate before an untouched holdout.
 """
 from __future__ import annotations
 
@@ -53,7 +53,7 @@ def calibrate(rows: list[dict], *, start: date, end: date) -> dict:
             "predeclared_contexts": report,
             "decision": {"keep_macro_support_gate": keep_support_gate,
                          "rule": "keep only if >=8 observations and up-rate exceeds all-day rate by >=5 percentage points"},
-            "limitations": ["This calibrates a deterministic gate, not DeepSeek model weights.", "The selected period must never be used to claim out-of-sample performance.", "Use an untouched later period for validation without changing the chosen rule."]}
+            "limitations": ["This calibrates a deterministic gate; it does not fit a model.", "The selected period must never be used to claim out-of-sample performance.", "Use an untouched later period for validation without changing the chosen rule."]}
 
 
 def main() -> None:
