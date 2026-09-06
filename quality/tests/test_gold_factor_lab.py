@@ -278,7 +278,7 @@ def test_swing_v3_core_trim_keeps_half_the_position_and_records_fee():
 def test_swing_v3_value_layer_enters_a_stabilised_discount_without_price_constants():
     prices = [100.0] * 120 + [98.0, 97.0, 97.2, 97.3, 97.4, 97.5, 97.7, 97.9, 98.1]
     rows = _v3_rows(prices)
-    result = swing_v3_replay(rows, start=date.fromisoformat(rows[127]["observed_on"]), end=date.fromisoformat(rows[127]["observed_on"]), tool_url="unused", use_deepseek=False)
+    result = swing_v3_replay(rows, start=date.fromisoformat(rows[127]["observed_on"]), end=date.fromisoformat(rows[128]["observed_on"]), tool_url="unused", use_deepseek=False)
     value_trade = next(item for item in result["trades"] if item["action"] == "BUY_VALUE")
     assert value_trade["price"] == rows[128]["price"]
     assert value_trade["reason"] == "VALUATION_DISCOUNT_STABILISED"
@@ -290,6 +290,15 @@ def test_swing_v3_blocks_entries_during_a_recent_downside_shock():
     feature = swing_v3_features(_v3_rows(prices))
     assert feature["downside_shock_active"] is True
     assert swing_v3_entry_kind(feature) == "none"
+
+
+def test_swing_v3_terminal_value_does_not_use_prices_after_the_requested_end():
+    rows = _v3_rows([100 * 1.002 ** index for index in range(135)])
+    end = date.fromisoformat(rows[127]["observed_on"])
+    bounded = swing_v3_replay(rows[:128], start=date.fromisoformat(rows[120]["observed_on"]), end=end, tool_url="unused", use_deepseek=False)
+    future_inclusive = swing_v3_replay(rows, start=date.fromisoformat(rows[120]["observed_on"]), end=end, tool_url="unused", use_deepseek=False)
+    assert future_inclusive["final_value"] == bounded["final_value"]
+    assert future_inclusive["buy_and_hold_final_value"] == bounded["buy_and_hold_final_value"]
 
 
 def test_blind_gold_v3_context_forbids_dates_and_unknown_fields(monkeypatch):

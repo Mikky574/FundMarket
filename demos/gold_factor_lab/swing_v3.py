@@ -374,10 +374,17 @@ def replay(rows: list[dict], *, start: date, end: date, tool_url: str,
         raise ValueError("start must not be after end")
     if len(rows) < config.warmup_sessions + 2:
         raise ValueError("not enough daily rows for swing-v3 warm-up and next-quote fills")
+    eligible_row_indexes = [
+        index for index, row in enumerate(rows)
+        if date.fromisoformat(row["observed_on"]) <= end
+    ]
+    if not eligible_row_indexes:
+        raise ValueError("no daily rows are available on or before the requested end date")
+    last_evaluation_index = eligible_row_indexes[-1]
     state = PositionState(cash=INITIAL_CASH)
     trades, events, model_calls = [], [], 0
     first_signal_index: int | None = None
-    for index in range(config.warmup_sessions, len(rows) - 1):
+    for index in range(config.warmup_sessions, min(len(rows) - 1, last_evaluation_index)):
         row, fill = rows[index], rows[index + 1]
         signal_day = date.fromisoformat(row["observed_on"])
         if not start <= signal_day <= end:
@@ -498,7 +505,7 @@ def replay(rows: list[dict], *, start: date, end: date, tool_url: str,
                        "executed": executed or ["HOLD"], "reason": [item[1] for item in actions]})
     if first_signal_index is None:
         raise ValueError("no eligible signal sessions in the requested period")
-    last_price = float(rows[-1]["price"])
+    last_price = float(rows[last_evaluation_index]["price"])
     mark_to_market_value = state.cash + _total_grams(state) * last_price
     terminal_exit_fee = _total_grams(state) * last_price * config.sell_fee if _total_grams(state) else 0.0
     final_value = mark_to_market_value - terminal_exit_fee
