@@ -1,8 +1,7 @@
 """Point-in-time daily replay for the isolated gold-factor experiment.
 
 This is a research backtest, never an order path.  A signal at day *t* uses
-only rows through day *t* and is filled at the next available daily quote.  The
-optional DeepSeek adapter receives sequential day numbers, not calendar dates.
+only rows through day *t* and is filled at the next available daily quote.
 """
 from __future__ import annotations
 
@@ -13,9 +12,6 @@ from calendar import monthrange
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Callable
-
-import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -126,93 +122,6 @@ def rule_decision(history: list[dict], *, in_position: bool, held_days: int, coo
     return Decision("HOLD", 0.4, "no fee-aware trend and macro transition", "rule", "FLAT", 0.4, macro_score, macro_available)
 
 
-def anonymised_prompt(history: list[dict], *, in_position: bool, rule: Decision) -> str:
-    """Create the exact model input; it intentionally has no calendar date."""
-    rows = []
-    start_index = max(0, len(history) - WARMUP_DAYS)
-    for absolute_index, row in enumerate(history[start_index:], start=start_index):
-        rows.append({
-            "day": absolute_index + 1,
-            "gold_cny_per_gram": round(float(row["price"]), 4),
-            "gold_return_1d_pct": round(float(row.get("return_1d", 0)) * 100, 3),
-            "usd_cny": row.get("usd_cny"),
-            "broad_us_dollar": row.get("broad_us_dollar"),
-            "us_10y_real_yield": row.get("us_10y_real_yield"),
-            "us_10y_nominal_yield": row.get("us_10y_nominal_yield"),
-            "wti_crude": row.get("wti_crude"),
-            **_technical_context(history[:absolute_index + 1]),
-        })
-    payload = {
-        "experiment": "daily historical blind replay",
-        "calendar_dates": "intentionally omitted",
-        "execution": "a decision after this row fills at the next observed daily quote; sell fee is 0.4%, buy fee is zero",
-        "position": "long_gold" if in_position else "cash",
-        "rule_candidate": rule.action,
-        "recent_observations": rows,
-    }
-    return (
-        "You are a constrained research classifier, not an investment adviser. "
-        "Do not infer dates and do not ask for future data. Return JSON only: "
-        '{"next_day_direction":"UP|DOWN|FLAT","direction_confidence":0..1,"horizon_5_10_direction":"UP|DOWN|FLAT","horizon_confidence":0..1,"technical_regime":"breakout|trend_continuation|near_resistance|near_support|range|breakdown|uncertain","action":"BUY|SELL|HOLD","confidence":0..1,"reason":"under 160 chars"}. '
-        "BUY means move from cash to gold; SELL means move from gold to cash. "
-        "Use only the sequential observations supplied below.\n"
-        + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-    )
-
-
-def _probability(value: object) -> float:
-    try:
-        return min(1.0, max(0.0, float(value)))
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def _code_tuple(value: object) -> tuple[str, ...]:
-    if not isinstance(value, list):
-        return ()
-    return tuple(str(item)[:48] for item in value[:6] if isinstance(item, str))
-
-
-def local_tool_decision(history: list[dict], *, in_position: bool, rule: Decision, tool_url: str,
-                        analysis_mode: str = "technical_breakout", analysis_context: dict | None = None,
-                        observations: list[dict] | None = None) -> Decision:
-    """Use the project's local DeepSeek capability; no credential enters this script."""
-    if observations is None:
-        payload = json.loads(anonymised_prompt(history, in_position=in_position, rule=rule).split("\n", 1)[1])
-        observations = payload["recent_observations"]
-    request = {"position": "long_gold" if in_position else "cash", "rule_candidate": rule.action,
-               "observations": observations, "analysis_mode": analysis_mode}
-    if analysis_context is not None:
-        request["analysis_context"] = analysis_context
-    response = httpx.post(tool_url, json=request, timeout=60)
-    response.raise_for_status()
-    data = response.json()
-    action = str(data.get("action", "HOLD")).upper()
-    if action not in {"BUY", "SELL", "HOLD"}:
-        action = "HOLD"
-    confidence = _probability(data.get("confidence"))
-    direction = str(data.get("next_day_direction", "FLAT")).upper()
-    if direction not in {"UP", "DOWN", "FLAT"}:
-        direction = "FLAT"
-    direction_confidence = _probability(data.get("direction_confidence"))
-    horizon_direction = str(data.get("horizon_5_10_direction", "FLAT")).upper()
-    if horizon_direction not in {"UP", "DOWN", "FLAT"}:
-        horizon_direction = "FLAT"
-    horizon_confidence = _probability(data.get("horizon_confidence"))
-    regime = str(data.get("technical_regime", "unknown"))[:40]
-    risk_severity = str(data.get("risk_severity", "material")).lower()
-    if risk_severity not in {"none", "mild", "material", "hard_block"}:
-        risk_severity = "material"
-    stance = str(data.get("stance", "NEUTRAL")).upper()
-    if stance not in {"BULLISH", "NEUTRAL", "BEARISH"}:
-        stance = "NEUTRAL"
-    evidence = tuple(item for item in data.get("evidence", [])[:4] if isinstance(item, dict)) if isinstance(data.get("evidence"), list) else ()
-    return Decision(action, confidence, str(data.get("reason", "no reason"))[:160], "deepseek_tool", direction, direction_confidence, 0, 0, horizon_direction, horizon_confidence, regime,
-                    stance, _probability(data.get("probability_net_gain_over_fee")), _probability(data.get("probability_material_loss")),
-                    str(data.get("expected_net_return_bucket", "minus_0.4_to_0.4"))[:40], risk_severity,
-                    _code_tuple(data.get("reason_codes")), _code_tuple(data.get("invalidation_codes")), evidence)
-
-
 def _daily_rows(panel: dict[str, list[dict]]) -> list[dict]:
     """Join only information observed no later than each gold quote's day."""
     factors = {name: {row["observed_on"]: float(row["value"]) for row in rows}
@@ -233,11 +142,10 @@ def _daily_rows(panel: dict[str, list[dict]]) -> list[dict]:
 
 
 def replay(rows: list[dict], *, trade_start: date, fee_rate: float = FEE_RATE,
-           initial_cash: float = INITIAL_CASH, decision_provider: Callable[[list[dict], bool, Decision], Decision] | None = None) -> dict:
-    """Run an all-cash/all-gold replay; decisions are made at close, filled next day."""
+           initial_cash: float = INITIAL_CASH) -> dict:
+    """Run an all-cash/all-gold deterministic replay, filled next day."""
     if fee_rate < 0 or fee_rate >= 1:
         raise ValueError("fee_rate must be in [0, 1)")
-    decision_provider = decision_provider or (lambda _history, _position, rule: rule)
     cash, grams, held_days, cooldown = initial_cash, 0.0, 0, 0
     trades, decisions = [], []
     for index in range(WARMUP_DAYS, len(rows) - 1):
@@ -245,15 +153,11 @@ def replay(rows: list[dict], *, trade_start: date, fee_rate: float = FEE_RATE,
         if date.fromisoformat(row["observed_on"]) < trade_start:
             continue
         rule = rule_decision(rows[:index + 1], in_position=grams > 0, held_days=held_days, cooldown_days=cooldown)
-        model = decision_provider(rows[:index + 1], grams > 0, rule)
-        # The model may veto a rule entry or request a sufficiently confident
-        # protective exit. An unsupported model BUY is never allowed.
-        action = "SELL" if rule.action == "SELL" or (grams > 0 and model.action == "SELL" and model.confidence >= 0.7 and model.next_day_direction == "DOWN" and model.direction_confidence >= 0.65) else ("BUY" if rule.action == "BUY" and model.action == "BUY" and model.confidence >= 0.7 and model.next_day_direction == "UP" and model.direction_confidence >= 0.65 else "HOLD")
+        action = rule.action
         next_return = float(fill["price"]) / float(row["price"]) - 1
         actual_direction = "UP" if next_return > 0 else "DOWN" if next_return < 0 else "FLAT"
         decisions.append({"signal_day": row["observed_on"], "fill_day": fill["observed_on"], "rule": rule.action,
-                          "model": model.action, "model_confidence": model.confidence,
-                          "next_day_direction": model.next_day_direction, "direction_confidence": model.direction_confidence,
+                          "next_day_direction": rule.next_day_direction, "direction_confidence": rule.direction_confidence,
                           "macro_score": rule.macro_score, "macro_available": rule.macro_available,
                           "actual_next_day_direction": actual_direction, "actual_next_day_return_percent": round(next_return * 100, 4), "executed": action})
         if action == "BUY" and cash > 0:
@@ -281,12 +185,12 @@ def replay(rows: list[dict], *, trade_start: date, fee_rate: float = FEE_RATE,
     up_correct = [item for item in up_calls if item["actual_next_day_direction"] == "UP"]
     return {"contract": {"signal": "daily close", "execution": "next observed daily quote", "buy_fee_rate": 0.0, "sell_fee_rate": fee_rate,
                            "availability": "exploratory assumed daily-close availability; not verified vendor release time"},
-            "frozen_rule": {"entry": "price>SMA5>SMA12, 5-day momentum >=1.2%, 10-day drawdown >=-0.7%, plus macro score >=1 when >=2 factors are available", "macro": "USD/CNY higher, real yield lower, broad dollar lower each add +1; inverse moves subtract 1; >=5% five-day oil move blocks entry", "model_gate": "BUY/UP requires action confidence >=0.70 and direction confidence >=0.65", "exit": "trend failure, 10-day drawdown <=-1.6%, or macro score <=-2", "anti_churn": "minimum 3 holding days; 2-day post-sale cooldown", "selection": "set before the next untouched validation period; no target-month parameter fitting"},
+            "frozen_rule": {"entry": "price>SMA5>SMA12, 5-day momentum >=1.2%, 10-day drawdown >=-0.7%, plus macro score >=1 when >=2 factors are available", "macro": "USD/CNY higher, real yield lower, broad dollar lower each add +1; inverse moves subtract 1; >=5% five-day oil move blocks entry", "exit": "trend failure, 10-day drawdown <=-1.6%, or macro score <=-2", "anti_churn": "minimum 3 holding days; 2-day post-sale cooldown", "selection": "set before the next untouched validation period; no target-month parameter fitting"},
             "initial_cash": initial_cash, "final_value": round(final_value, 2), "return_percent": round((final_value / initial_cash - 1) * 100, 3),
             "buy_and_hold_final_value": round(buy_hold_value, 2), "buy_and_hold_return_percent": round((buy_hold_value / initial_cash - 1) * 100, 3),
             "fees_paid": round(sum(trade["fee"] for trade in trades), 2), "trade_count": len(trades),
             "prediction_metrics": {"all_days": len(decisions), "directional_calls": len(directional), "directional_accuracy_percent": round(100 * len(correct) / len(directional), 2) if directional else None, "up_call_precision_percent": round(100 * len(up_correct) / len(up_calls), 2) if up_calls else None}, "trades": trades, "decisions": decisions,
-            "limitations": ["The historical JD chart was retrieved after the fact; replay assumes each quoted daily point was usable after its own close.", "This is one historical month, not evidence that a rule is profitable out of sample.", "DeepSeek output is constrained by deterministic risk gates and is not a trading instruction."]}
+            "limitations": ["The historical JD chart was retrieved after the fact; replay assumes each quoted daily point was usable after its own close.", "This is one historical month, not evidence that a rule is profitable out of sample."]}
 
 
 def main() -> None:
@@ -294,8 +198,6 @@ def main() -> None:
     parser.add_argument("--month", type=date.fromisoformat, help="Any date in the target month; default is three months prior.")
     parser.add_argument("--start", type=date.fromisoformat, help="Explicit inclusive target start; must be paired with --end.")
     parser.add_argument("--end", type=date.fromisoformat, help="Explicit inclusive target end; must be paired with --start.")
-    parser.add_argument("--deepseek", action="store_true", help="Use the local project's DeepSeek research capability.")
-    parser.add_argument("--tool-url", default="http://127.0.0.1:8000/api/v1/internal/research/gold-blind-decision")
     parser.add_argument("--output", type=Path, required=True, help="Ignored research-output path, e.g. data/gold_lab/evaluations/june.json")
     args = parser.parse_args()
     if bool(args.start) != bool(args.end):
@@ -312,12 +214,9 @@ def main() -> None:
         start, end = third_prior_month(date.today())
     panel = collect_factor_panel(start=start - timedelta(days=80), end=end)
     rows = _daily_rows(panel)
-    provider = None
-    if args.deepseek:
-        provider = lambda history, position, rule: local_tool_decision(history, in_position=position, rule=rule, tool_url=args.tool_url)
-    result = replay(rows, trade_start=start, decision_provider=provider)
+    result = replay(rows, trade_start=start)
     result["target_period"] = {"start": start.isoformat(), "end": end.isoformat()}
-    result["strategy"] = "deepseek_guarded" if args.deepseek else "deterministic_rule_baseline"
+    result["strategy"] = "deterministic_rule_baseline"
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     print(args.output.resolve())

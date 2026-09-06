@@ -1,39 +1,17 @@
-# 黄金因子实验室 Demo
+# 黄金因子实验 Demo
 
-这是一个与网站、QQ、账本及生产评估数据完全隔离的只读实验。实时主线是京东浙商积存金分钟走势；日线与美国十年期名义/实际利率、广义美元指数、美元兑人民币、WTI 原油仅作为慢变量背景，不产生交易指令。
+这是一个与网站、QQ、账本和生产评估数据隔离的研究 Demo。它观察京东浙商积存金报价及少量可解释的宏观因子，用于验证确定性趋势与仓位规则；不下单、不写账本。
 
-实时快照（默认仅取一次，不写文件）：
+策略回放使用以下统一口径：买入手续费为 0%，实际卖出手续费为 0.4%，期末持仓按市值估值，不模拟卖出。
 
-```powershell
-.\.venv\Scripts\python.exe demos\gold_factor_lab\watch_live.py --samples 1
-```
+主要入口：
 
-持续采集任务（独立 SQLite，未连接网站、QQ 或账本）：
+- `collector.py`：公开报价和宏观因子采集。
+- `watch_live.py`：单次或定时的实时观察。
+- `swing_v3.py`：v3 与 v4 的确定性日线回放；v4 为低换手、估值限制的卫星仓版本。
+- `analysis.py`：只读描述性分析。
+- `history_chart.py`：历史曲线页面。
 
-```powershell
-.\.venv\Scripts\python.exe demos\gold_factor_lab\live_task.py --once
-```
+DeepSeek 不参与任何 Demo 策略的入场、加仓、减仓或退出。它属于 QQ/网站侧的解释能力，可用于说明已经由规则生成的趋势、风险和仓位状态。
 
-历史曲线（生成独立 HTML）：
-
-```powershell
-.\.venv\Scripts\python.exe demos\gold_factor_lab\history_chart.py --start 2026-08-03 --end 2026-09-03
-```
-
-```powershell
-.\.venv\Scripts\python.exe demos\gold_factor_lab\run_demo.py --start 2026-08-03 --end 2026-09-03
-```
-
-盲测回放（默认取当前日期前三个月的完整月份；信号在每日收盘后生成、以下一个日线报价成交；买入手续费为 0，卖出手续费为 0.4%）：
-
-```powershell
-# 先跑不调用模型的规则基线
-.\.venv\Scripts\python.exe demos\gold_factor_lab\blind_replay.py --month 2026-06-01 --output data\gold_lab\evaluations\june_rule.json
-
-# 通过项目本机的 DeepSeek 研究能力调用；回放脚本不读取密钥
-.\.venv\Scripts\python.exe demos\gold_factor_lab\blind_replay.py --month 2026-06-01 --deepseek --output data\gold_lab\evaluations\june_deepseek.json
-```
-
-DeepSeek 只会看到顺序编号的历史行（`day`），不会得到日历日期、之后的价格或未来数据。该回放使用“日线收盘后可知”的探索性假设；京东历史图没有提供可核验的原始发布时间，因此结果只能用于方法筛选，不能视作实盘盈利证明。
-
-原始历史点默认只在本次采集时间可用，防止回测把后来取得的图表数据当作当时已知信息。任何“次日可用”的假设须在后续评估阶段单独版本化、验证，不能直接变成实盘规则。
+历史图表与公开因子数据均可能是事后取得，不能据此声称历史时点可实时获得，也不能把回放结果视为实盘盈利证明。

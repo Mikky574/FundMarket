@@ -1,8 +1,7 @@
 """Fee-aware 5--10 session swing experiment for accumulated gold.
 
 This is separate from the next-day classifier experiment. It uses a trend
-regime as the primary signal; the local DeepSeek tool can only veto an entry
-when it emits a high-confidence downside warning.
+regime as the primary signal and has no model-driven decision path.
 """
 from __future__ import annotations
 
@@ -14,7 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from demos.gold_factor_lab.blind_replay import Decision, _daily_rows, _macro_context, _sma, local_tool_decision
+from demos.gold_factor_lab.blind_replay import _daily_rows, _macro_context, _sma
 from demos.gold_factor_lab.collector import collect_factor_panel
 
 
@@ -36,30 +35,10 @@ def _trend_entry(history: list[dict]) -> tuple[bool, int]:
     return (continuation or confirmed_breakout) and macro_ok and not oil_risk, macro_score
 
 
-def _model_panel(history: list[dict], *, in_position: bool, tool_url: str) -> dict[str, Decision]:
-    """Obtain independent technical, macro and skeptical analyses per candidate."""
-    neutral_rule = Decision("HOLD", 0.0, "trend regime handles entry", "swing_rule", "FLAT", 0.0)
-    return {mode: local_tool_decision(history, in_position=in_position, rule=neutral_rule, tool_url=tool_url, analysis_mode=mode)
-            for mode in ("technical_breakout", "macro_regime", "risk_skeptic")}
-
-
-def _panel_allows_entry(panel: dict[str, Decision]) -> tuple[bool, bool]:
-    """Require support from technical and macro roles; honour skeptical evidence."""
-    technical, macro, skeptic = panel["technical_breakout"], panel["macro_regime"], panel["risk_skeptic"]
-    support = (technical.horizon_direction == "UP" and technical.horizon_confidence >= 0.6 and
-               macro.horizon_direction != "DOWN" and macro.horizon_confidence >= 0.55)
-    skeptic_blocks = ((skeptic.action == "SELL" and skeptic.confidence >= 0.55) or
-                      (skeptic.horizon_direction == "DOWN" and skeptic.horizon_confidence >= 0.55) or
-                      (skeptic.technical_regime in {"near_resistance", "breakdown"} and skeptic.action != "BUY"))
-    return support and not skeptic_blocks, skeptic_blocks
-
-
-def replay(rows: list[dict], *, start: date, end: date, tool_url: str, use_deepseek: bool = False) -> dict:
-    """Run the deterministic legacy replay; DeepSeek is explanation-only."""
-    if use_deepseek:
-        raise ValueError("DeepSeek is explanation-only and cannot participate in swing replay decisions")
+def replay(rows: list[dict], *, start: date, end: date) -> dict:
+    """Run the deterministic legacy replay."""
     cash, grams, held_days, added = INITIAL_CASH, 0.0, 0, False
-    trades, events, model_calls = [], [], 0
+    trades, events = [], []
     for index in range(20, len(rows) - 1):
         row, fill = rows[index], rows[index + 1]
         signal_date = date.fromisoformat(row["observed_on"])
@@ -68,29 +47,15 @@ def replay(rows: list[dict], *, start: date, end: date, tool_url: str, use_deeps
         entry_ok, macro_score = _trend_entry(rows[:index + 1])
         prices = [float(item["price"]) for item in rows[:index + 1]]
         exit_now = grams > 0 and held_days >= 5 and (prices[-1] < _sma(prices, 10) or macro_score <= -2 or held_days >= 15)
-        panel: dict[str, Decision] = {}
-        model = Decision("HOLD", 0, "not called", "not_called")
-        veto = False
-        if entry_ok and cash > 0 and not exit_now and (grams == 0 or (held_days >= 3 and not added)) and use_deepseek:
-            panel = _model_panel(rows[:index + 1], in_position=grams > 0, tool_url=tool_url)
-            model = panel["technical_breakout"]
-            model_calls += len(panel)
-            macro = panel["macro_regime"]
-            allowed_by_panel, veto = _panel_allows_entry(panel)
         action = "HOLD"
         if exit_now:
             action = "SELL"
-        elif entry_ok and not veto and (not use_deepseek or allowed_by_panel) and grams == 0:
+        elif entry_ok and grams == 0:
             action = "BUY_50"
-        elif entry_ok and not veto and grams > 0 and held_days >= 3 and not added and (not use_deepseek or (allowed_by_panel and model.technical_regime in {"breakout", "trend_continuation"} and macro.horizon_direction != "DOWN")):
+        elif entry_ok and grams > 0 and held_days >= 3 and not added:
             action = "ADD_25"
-        analyses = {role: {"action": item.action, "confidence": item.confidence,
-                            "next_day_direction": item.next_day_direction, "horizon_5_10_direction": item.horizon_direction,
-                            "horizon_confidence": item.horizon_confidence, "technical_regime": item.technical_regime,
-                            "reason": item.reason} for role, item in panel.items()}
         events.append({"signal_day": row["observed_on"], "fill_day": fill["observed_on"], "entry_ok": entry_ok,
-                       "macro_score": macro_score, "held_days": held_days, "model_action": model.action,
-                       "model_direction": model.next_day_direction, "model_veto": veto, "analyses": analyses, "executed": action})
+                       "macro_score": macro_score, "held_days": held_days, "executed": action})
         price = float(fill["price"])
         if action in {"BUY_50", "ADD_25"}:
             amount = cash * 0.5 if action == "BUY_50" else min(cash, INITIAL_CASH * 0.25)
@@ -121,7 +86,7 @@ def replay(rows: list[dict], *, start: date, end: date, tool_url: str, use_deeps
             "initial_cash": INITIAL_CASH, "final_value": round(final_value, 2), "mark_to_market_value": round(mark_to_market_value, 2),
             "terminal_exit_fee": round(terminal_exit_fee, 2), "open_grams": round(grams, 8), "return_percent": round((final_value / INITIAL_CASH - 1) * 100, 3),
             "buy_and_hold_return_percent": round((buy_hold / INITIAL_CASH - 1) * 100, 3), "trade_count": len(trades), "realized_fees_paid": round(sum(t["fee"] for t in trades), 2),
-            "fees_paid": round(sum(t["fee"] for t in trades), 2), "model_calls": model_calls, "trades": trades, "events": events,
+            "fees_paid": round(sum(t["fee"] for t in trades), 2), "trades": trades, "events": events,
             "limitations": ["This is a separate development strategy, not a replacement for the frozen next-day experiment.", "Only a holdout period not used to shape this rule may support an out-of-sample claim."]}
 
 
@@ -130,11 +95,9 @@ def main() -> None:
     parser.add_argument("--start", type=date.fromisoformat, required=True)
     parser.add_argument("--end", type=date.fromisoformat, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--no-deepseek", action="store_true")
-    parser.add_argument("--tool-url", default="http://127.0.0.1:8000/api/v1/internal/research/gold-blind-decision")
     args = parser.parse_args()
     panel = collect_factor_panel(start=args.start - timedelta(days=80), end=args.end)
-    result = replay(_daily_rows(panel), start=args.start, end=args.end, tool_url=args.tool_url, use_deepseek=False)
+    result = replay(_daily_rows(panel), start=args.start, end=args.end)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     print(args.output.resolve())

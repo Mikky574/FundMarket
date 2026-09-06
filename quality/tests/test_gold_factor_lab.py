@@ -5,12 +5,12 @@ import httpx
 from demos.gold_factor_lab.analysis import describe
 from demos.gold_factor_lab import collector
 from demos.gold_factor_lab.history_chart import build_html
-from demos.gold_factor_lab.blind_replay import Decision, _daily_rows, _macro_context, anonymised_prompt, local_tool_decision, replay, third_prior_month
+from demos.gold_factor_lab.blind_replay import Decision, _daily_rows, _macro_context, replay, third_prior_month
 from tools.deepseek_blind_gold_tool import invoke
 from demos.gold_factor_lab.factor_calibration import calibrate
 from demos.gold_factor_lab.evaluation_report import build_html as build_evaluation_html
 from demos.gold_factor_lab.swing_replay import replay as swing_replay
-from demos.gold_factor_lab.swing_v3 import PositionState, SwingV4Config, _promote_value_to_core, _standardised_observations, _trim_core, entry_kind as swing_v3_entry_kind, features as swing_v3_features, replay as swing_v3_replay, replay_v4
+from demos.gold_factor_lab.swing_v3 import PositionState, SwingV4Config, _promote_value_to_core, _trim_core, entry_kind as swing_v3_entry_kind, features as swing_v3_features, replay as swing_v3_replay, replay_v4
 from src.quant_research.contracts import BlindGoldAnalysisContext
 from src.quant_research.intelligence import analyse_blind_gold
 
@@ -128,44 +128,20 @@ def test_history_chart_separates_units_and_states_attribution_limit():
     assert "不能严谨地把本段涨跌归因" in rendered
 
 
-def test_blind_replay_hides_dates_and_fills_next_daily_quote():
+def test_blind_replay_uses_next_daily_quote():
     rows = [
         {"observed_on": f"2026-01-{day:02d}", "price": 100 + day, "return_1d": 0}
         for day in range(1, 29)
     ]
-    prompt = anonymised_prompt(rows[:20], in_position=False, rule=Decision("BUY", 0.7, "trend", "rule"))
-    assert "2026-" not in prompt
-    calls = iter((Decision("BUY", 0.9, "confirm", "test", "UP", 0.9), Decision("SELL", 0.9, "protect", "test", "DOWN", 0.9)))
-    result = replay(rows, trade_start=date(2026, 1, 1), decision_provider=lambda *_args: next(calls, Decision("HOLD", 0, "", "test")))
+    result = replay(rows, trade_start=date(2026, 1, 1))
     assert result["trades"][0]["signal_day"] == "2026-01-21"
     assert result["trades"][0]["fill_day"] == "2026-01-22"
-    assert result["fees_paid"] > 0
+    assert result["fees_paid"] == 0
     assert result["prediction_metrics"]["directional_calls"] > 0
 
 
 def test_third_prior_month_is_a_complete_month():
     assert third_prior_month(date(2026, 9, 3)) == (date(2026, 6, 1), date(2026, 6, 30))
-
-
-def test_blind_replay_uses_local_tool_without_sending_calendar_dates(monkeypatch):
-    sent = {}
-
-    class Response:
-        def raise_for_status(self): pass
-        def json(self): return {"action": "BUY", "confidence": 0.8, "reason": "trend"}
-
-    def post(url, **kwargs):
-        sent["url"], sent["json"] = url, kwargs["json"]
-        return Response()
-
-    monkeypatch.setattr("demos.gold_factor_lab.blind_replay.httpx.post", post)
-    result = local_tool_decision(
-        [{"observed_on": "2026-01-01", "price": 100, "return_1d": 0}], in_position=False,
-        rule=Decision("BUY", 0.7, "trend", "rule"), tool_url="http://local/tool",
-    )
-    assert result.action == "BUY"
-    assert sent["url"] == "http://local/tool"
-    assert "2026-" not in str(sent["json"])
 
 
 def test_sandbox_tool_only_accepts_the_blind_contract(monkeypatch):
@@ -220,7 +196,7 @@ def test_evaluation_report_explains_flat_cash_is_not_profit():
 def test_swing_replay_uses_partial_entry_and_sell_fee():
     rows = [{"observed_on": f"2026-01-{day:02d}", "price": 100 + day, "usd_cny": 7.1, "broad_us_dollar": 100,
              "us_10y_real_yield": 2, "wti_crude": 70} for day in range(1, 29)]
-    result = swing_replay(rows, start=date(2026, 1, 21), end=date(2026, 1, 27), tool_url="unused", use_deepseek=False)
+    result = swing_replay(rows, start=date(2026, 1, 21), end=date(2026, 1, 27))
     assert any(item["action"] == "BUY_50" for item in result["trades"])
     assert result["terminal_exit_fee"] == 0
     assert result["final_value"] == result["mark_to_market_value"]
@@ -240,7 +216,7 @@ def _v3_rows(prices: list[float]) -> list[dict]:
 
 def test_swing_v3_accrues_terminal_sell_fee_and_uses_next_quote():
     rows = _v3_rows([100 * 1.002 ** index for index in range(135)])
-    result = swing_v3_replay(rows, start=date.fromisoformat(rows[120]["observed_on"]), end=date.fromisoformat(rows[127]["observed_on"]), tool_url="unused", use_deepseek=False)
+    result = swing_v3_replay(rows, start=date.fromisoformat(rows[120]["observed_on"]), end=date.fromisoformat(rows[127]["observed_on"]))
     assert result["trades"][0]["action"] == "BUY_SATELLITE"
     assert any(item["action"] == "BUY_SATELLITE" for item in result["trades"])
     assert not any(item["action"] == "BUY_CORE" for item in result["trades"])
@@ -250,23 +226,20 @@ def test_swing_v3_accrues_terminal_sell_fee_and_uses_next_quote():
     assert result["final_value"] == result["mark_to_market_value"]
 
 
-def test_swing_v3_features_and_model_window_do_not_use_future_rows():
+def test_swing_v3_features_do_not_use_future_rows():
     rows = _v3_rows([100 * 1.0015 ** index for index in range(135)])
     before = swing_v3_features(rows[:121])
-    observations = _standardised_observations(rows[:121])
     for row in rows[121:]:
         row["price"] *= 10
     after = swing_v3_features(rows[:121])
     assert before == after
-    assert "2026-" not in str(observations)
-    assert "gold_cny_per_gram" not in str(observations)
 
 
 def test_swing_v3_sells_satellite_without_forcing_core_exit():
     rising = [100 * 1.002 ** index for index in range(126)]
     prices = rising + [rising[-1] * 0.98, rising[-1] * 0.979, rising[-1] * 0.978, rising[-1] * 0.977]
     rows = _v3_rows(prices)
-    result = swing_v3_replay(rows, start=date.fromisoformat(rows[120]["observed_on"]), end=date.fromisoformat(rows[128]["observed_on"]), tool_url="unused", use_deepseek=False)
+    result = swing_v3_replay(rows, start=date.fromisoformat(rows[120]["observed_on"]), end=date.fromisoformat(rows[128]["observed_on"]))
     assert any(item["action"] == "SELL_SATELLITE" for item in result["trades"])
     assert not any(item["action"] == "SELL_CORE" for item in result["trades"])
     assert result["open_core_grams"] == 0
@@ -293,21 +266,10 @@ def test_swing_v3_core_trim_keeps_half_the_position_and_records_fee():
 def test_swing_v3_value_layer_enters_a_stabilised_discount_without_price_constants():
     prices = [100.0] * 120 + [98.0, 97.0, 97.2, 97.3, 97.4, 97.5, 97.7, 97.9, 98.1]
     rows = _v3_rows(prices)
-    result = swing_v3_replay(rows, start=date.fromisoformat(rows[127]["observed_on"]), end=date.fromisoformat(rows[128]["observed_on"]), tool_url="unused", use_deepseek=False)
+    result = swing_v3_replay(rows, start=date.fromisoformat(rows[127]["observed_on"]), end=date.fromisoformat(rows[128]["observed_on"]))
     value_trade = next(item for item in result["trades"] if item["action"] == "BUY_VALUE")
     assert value_trade["price"] == rows[128]["price"]
     assert value_trade["reason"] == "VALUATION_DISCOUNT_STABILISED"
-
-
-def test_swing_v3_rejects_model_participation_in_trade_decisions():
-    prices = [100.0] * 120 + [98.0, 97.0, 97.2, 97.3, 97.4, 97.5, 97.7, 97.9, 98.1]
-    rows = _v3_rows(prices)
-    try:
-        swing_v3_replay(rows, start=date.fromisoformat(rows[127]["observed_on"]), end=date.fromisoformat(rows[128]["observed_on"]), tool_url="unused", use_deepseek=True)
-    except ValueError as exc:
-        assert "explanation-only" in str(exc)
-    else:
-        raise AssertionError("swing-v3 accepted a model decision path")
 
 
 def test_swing_v4_removes_the_second_satellite_add_and_caps_the_first_add():
@@ -331,8 +293,8 @@ def test_swing_v3_blocks_entries_during_a_recent_downside_shock():
 def test_swing_v3_terminal_value_does_not_use_prices_after_the_requested_end():
     rows = _v3_rows([100 * 1.002 ** index for index in range(135)])
     end = date.fromisoformat(rows[127]["observed_on"])
-    bounded = swing_v3_replay(rows[:128], start=date.fromisoformat(rows[120]["observed_on"]), end=end, tool_url="unused", use_deepseek=False)
-    future_inclusive = swing_v3_replay(rows, start=date.fromisoformat(rows[120]["observed_on"]), end=end, tool_url="unused", use_deepseek=False)
+    bounded = swing_v3_replay(rows[:128], start=date.fromisoformat(rows[120]["observed_on"]), end=end)
+    future_inclusive = swing_v3_replay(rows, start=date.fromisoformat(rows[120]["observed_on"]), end=end)
     assert future_inclusive["final_value"] == bounded["final_value"]
     assert future_inclusive["buy_and_hold_final_value"] == bounded["buy_and_hold_final_value"]
 

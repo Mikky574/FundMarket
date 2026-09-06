@@ -1,8 +1,7 @@
 """Fee-aware, point-in-time swing-v3 research replay for accumulated gold.
 
 The deterministic layer finds trend breakouts and pullback resumptions, sizes
-positions, and exits them.  The optional DeepSeek panel can only reduce risk;
-it cannot manufacture an entry.  This module is intentionally separate from
+positions, and exits them. This module is intentionally separate from
 ``swing_replay.py`` so prior research artifacts remain reproducible.
 """
 from __future__ import annotations
@@ -11,19 +10,14 @@ import argparse
 import json
 import statistics
 import sys
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Callable
-
-import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from demos.gold_factor_lab.blind_replay import Decision, _daily_rows, _macro_context, local_tool_decision
+from demos.gold_factor_lab.blind_replay import _daily_rows, _macro_context
 from demos.gold_factor_lab.collector import collect_factor_panel
-from src.quant_research.contracts import BlindGoldAnalysisContext
 
 
 SELL_FEE = 0.004
@@ -89,9 +83,6 @@ class PositionState:
     below_ema20_streak: int = 0
     below_sma60_streak: int = 0
     core_trimmed: bool = False
-
-
-PanelProvider = Callable[[list[dict], dict, PositionState], dict[str, Decision]]
 
 
 def _sma(values: list[float], period: int) -> float | None:
@@ -202,129 +193,6 @@ def _total_grams(state: PositionState) -> float:
     return state.core_grams + state.value_grams + state.satellite_grams
 
 
-def _standardised_observations(history: list[dict]) -> list[dict]:
-    """Keep the model window date-free and free of absolute CNY price levels."""
-    window = history[-20:]
-    base_price = float(window[0]["price"])
-    return [
-        {
-            "day": offset,
-            "gold_index_base100": round(float(row["price"]) / base_price * 100, 4),
-            "gold_return_1d_pct": round(float(row.get("return_1d", 0)) * 100, 4),
-        }
-        for offset, row in enumerate(window, start=1)
-    ]
-
-
-def analysis_context(history: list[dict], feature: dict, state: PositionState, *, stage: str,
-                     candidate: str, config: SwingV3Config = SwingV3Config()) -> dict:
-    """Create the strict, feature-only context sent to every panel role."""
-    price = feature["price"]
-    max_factor_age = 1 if feature["macro_available"] else 20
-    return BlindGoldAnalysisContext(
-        sequence=len(history),
-        candidate_stage=stage,
-        requested_horizon_sessions=[5, 10],
-        current_weight_pct=round(_position_weight(state, price) * 100, 4),
-        held_sessions=state.held_sessions,
-        buy_fee_pct=0.0,
-        sell_fee_pct=round(config.sell_fee * 100, 4),
-        max_factor_age_sessions=max_factor_age,
-        candidate_kind=candidate,
-        realized_volatility_20d_pct=round(feature["volatility"] * 100, 4),
-        price_vs_ema5_pct=round((price / feature["ema5"] - 1) * 100, 4),
-        price_vs_ema20_pct=round((price / feature["ema20"] - 1) * 100, 4),
-        price_vs_sma60_pct=round((price / feature["sma60"] - 1) * 100, 4),
-        ema20_slope_5d_pct=round((feature["ema20"] / feature["ema20_five_sessions_ago"] - 1) * 100, 4),
-        distance_to_resistance20_pct=round((price / feature["resistance20"] - 1) * 100, 4),
-        distance_to_support20_pct=round((price / feature["support20"] - 1) * 100, 4),
-        macro_score=feature["macro_score"],
-        macro_available=feature["macro_available"],
-    ).model_dump(exclude_none=True)
-
-
-def _model_panel(history: list[dict], feature: dict, state: PositionState, *, stage: str,
-                 candidate: str, tool_url: str, config: SwingV3Config) -> dict[str, Decision]:
-    """Ask distinct research roles once per setup; none owns execution."""
-    neutral_rule = Decision("HOLD", 0.0, "deterministic swing-v3 candidate", "swing_v3")
-    context = analysis_context(history, feature, state, stage=stage, candidate=candidate, config=config)
-    observations = _standardised_observations(history)
-    modes = ("technical_breakout", "macro_regime", "trade_quality", "risk_skeptic")
-    try:
-        with ThreadPoolExecutor(max_workers=len(modes)) as executor:
-            futures = {
-                mode: executor.submit(
-                    local_tool_decision,
-                    history,
-                    in_position=_total_grams(state) > 0,
-                    rule=neutral_rule,
-                    tool_url=tool_url,
-                    analysis_mode=mode,
-                    analysis_context=context,
-                    observations=observations,
-                )
-                for mode in modes
-            }
-            panel = {mode: futures[mode].result() for mode in modes}
-    except (httpx.HTTPError, RuntimeError, ValueError):
-        # A partial panel must never be interpreted as approval.  The risk
-        # layer blocks the candidate and records the provider failure.
-        return {
-            mode: Decision("HOLD", 0.0, "model review unavailable", "model_fallback",
-                           risk_severity="hard_block" if mode == "risk_skeptic" else "material",
-                           reason_codes=("MODEL_REVIEW_UNAVAILABLE",))
-            for mode in modes
-        }
-    return panel
-
-
-def _fuse_panel(panel: dict[str, Decision]) -> dict:
-    """Translate model risk into a cap; it can never create an entry."""
-    if not panel:
-        return {"multiplier": 1.0, "hard_block": False, "reason_codes": [], "role_caps": {}}
-    skeptic = panel.get("risk_skeptic", Decision("HOLD", 0, "missing skeptic", "fallback"))
-    multiplier = {"none": 1.0, "mild": 0.75, "material": 0.50, "hard_block": 0.0}.get(skeptic.risk_severity, 0.50)
-    role_caps = {"risk_skeptic": multiplier}
-    technical = panel.get("technical_breakout")
-    if technical and (technical.technical_regime == "breakdown" or technical.stance == "BEARISH"):
-        role_caps["technical_breakout"] = 0.50
-        multiplier = min(multiplier, 0.50)
-    macro = panel.get("macro_regime")
-    if macro and macro.stance == "BEARISH":
-        role_caps["macro_regime"] = 0.75
-        multiplier = min(multiplier, 0.75)
-    odds = panel.get("trade_quality")
-    if odds:
-        if odds.probability_net_gain_over_fee < 0.45 or odds.expected_net_return_bucket == "below_minus_0.4":
-            role_caps["trade_quality"] = 0.50
-            multiplier = min(multiplier, 0.50)
-        elif odds.probability_net_gain_over_fee < 0.55:
-            role_caps["trade_quality"] = 0.75
-            multiplier = min(multiplier, 0.75)
-    reason_codes = []
-    for decision in panel.values():
-        for code in decision.reason_codes:
-            if code not in reason_codes:
-                reason_codes.append(code)
-    return {"multiplier": multiplier, "hard_block": skeptic.risk_severity == "hard_block", "reason_codes": reason_codes[:12], "role_caps": role_caps}
-
-
-def _analysis_audit(panel: dict[str, Decision]) -> dict:
-    return {
-        role: {
-            "stance": decision.stance,
-            "risk_severity": decision.risk_severity,
-            "probability_net_gain_over_fee": decision.probability_net_gain_over_fee,
-            "probability_material_loss": decision.probability_material_loss,
-            "expected_net_return_bucket": decision.expected_net_return_bucket,
-            "reason_codes": list(decision.reason_codes),
-            "invalidation_codes": list(decision.invalidation_codes),
-            "reason": decision.reason,
-        }
-        for role, decision in panel.items()
-    }
-
-
 def _exit_reason(feature: dict, state: PositionState, *, config: SwingV3Config) -> str | None:
     price = feature["price"]
     if price <= state.satellite_average_entry * (1 - config.initial_stop_sigma * state.satellite_entry_volatility):
@@ -408,18 +276,11 @@ def _promote_value_to_core(state: PositionState, *, price: float, target_weight:
     return grams, grams * price
 
 
-def replay(rows: list[dict], *, start: date, end: date, tool_url: str,
-           use_deepseek: bool = False, panel_provider: PanelProvider | None = None,
+def replay(rows: list[dict], *, start: date, end: date,
            config: SwingV3Config = SwingV3Config()) -> dict:
-    """Replay deterministic core plus satellite decisions, filled at the next quote.
-
-    DeepSeek is intentionally excluded from this decision path. It remains a
-    separate explanation capability for QQ and dashboard conversations.
-    """
+    """Replay deterministic core plus satellite decisions, filled at the next quote."""
     if start > end:
         raise ValueError("start must not be after end")
-    if use_deepseek or panel_provider is not None:
-        raise ValueError("DeepSeek review is explanation-only and cannot participate in swing-v3 decisions")
     if len(rows) < config.warmup_sessions + 2:
         raise ValueError("not enough daily rows for swing-v3 warm-up and next-quote fills")
     eligible_row_indexes = [
@@ -430,7 +291,7 @@ def replay(rows: list[dict], *, start: date, end: date, tool_url: str,
         raise ValueError("no daily rows are available on or before the requested end date")
     last_evaluation_index = eligible_row_indexes[-1]
     state = PositionState(cash=INITIAL_CASH)
-    trades, events, model_calls = [], [], 0
+    trades, events = [], []
     first_signal_index: int | None = None
     for index in range(config.warmup_sessions, min(len(rows) - 1, last_evaluation_index)):
         row, fill = rows[index], rows[index + 1]
@@ -475,45 +336,32 @@ def replay(rows: list[dict], *, start: date, end: date, tool_url: str,
             elif state.add_stage == 1 and config.satellite_add_two_weight > 0 and candidate == "breakout" and feature["macro_score"] >= 1:
                 add_kind = "add_two"
         satellite_setup = (not state.satellite_grams and candidate != "none") or add_kind != "none"
-        setup_exists = core_entry or value_entry or value_add or satellite_setup
-        panel: dict[str, Decision] = {}
-        context: dict | None = None
-        if setup_exists:
-            context = analysis_context(history, feature, state, stage=stage, candidate=candidate, config=config)
-            if panel_provider is not None:
-                panel = panel_provider(history, context, state)
-            elif use_deepseek:
-                panel = _model_panel(history, feature, state, stage=stage, candidate=candidate, tool_url=tool_url, config=config)
-            model_calls += len(panel)
-        fusion = _fuse_panel(panel)
         macro_multiplier = _macro_multiplier(feature)
         actions: list[tuple[str, str, float]] = []
         if core_exit_reason:
             actions.append(("SELL_CORE", core_exit_reason, 0.0))
         elif core_trim_reason:
             actions.append(("TRIM_CORE", core_trim_reason, config.core_trim_fraction))
-        elif core_entry and not fusion["hard_block"]:
-            actions.append(("BUY_CORE", "LONG_TREND_CORE_ALLOCATION", config.core_weight * fusion["multiplier"]))
+        elif core_entry:
+            actions.append(("BUY_CORE", "LONG_TREND_CORE_ALLOCATION", config.core_weight))
         if value_exit:
             actions.append(("SELL_VALUE", "VALUATION_PREMIUM_AND_SHORT_TREND_WEAKNESS", 0.0))
-        elif value_entry and not fusion["hard_block"]:
-            actions.append(("BUY_VALUE", "VALUATION_DISCOUNT_STABILISED", config.value_initial_weight * fusion["multiplier"]))
-        elif value_add and not fusion["hard_block"]:
-            actions.append(("ADD_VALUE", "DEEPER_VALUATION_DISCOUNT_STABILISED", (config.value_initial_weight + config.value_add_weight) * fusion["multiplier"]))
+        elif value_entry:
+            actions.append(("BUY_VALUE", "VALUATION_DISCOUNT_STABILISED", config.value_initial_weight))
+        elif value_add:
+            actions.append(("ADD_VALUE", "DEEPER_VALUATION_DISCOUNT_STABILISED", config.value_initial_weight + config.value_add_weight))
         if satellite_exit_reason:
             actions.append(("SELL_SATELLITE", satellite_exit_reason, 0.0))
-        elif satellite_setup and not fusion["hard_block"]:
+        elif satellite_setup:
             if not state.satellite_grams:
-                actions.append(("BUY_SATELLITE", candidate.upper(), config.satellite_initial_weight * macro_multiplier * fusion["multiplier"]))
+                actions.append(("BUY_SATELLITE", candidate.upper(), config.satellite_initial_weight * macro_multiplier))
             elif add_kind == "add_one":
                 actions.append(("ADD_SATELLITE_ONE", "PROFIT_CONFIRMED_TREND", min(config.satellite_initial_weight + config.satellite_add_one_weight,
-                                                                                       config.satellite_initial_weight + config.satellite_add_one_weight * macro_multiplier * fusion["multiplier"])))
+                                                                                       config.satellite_initial_weight + config.satellite_add_one_weight * macro_multiplier)))
             elif add_kind == "add_two":
                 satellite_cap = max(0.0, 1.0 - config.core_weight - _layer_weight(state, "value", feature["price"]))
                 actions.append(("ADD_SATELLITE_TWO", "BREAKOUT_AFTER_PROFIT", min(1.0 - config.core_weight,
-                                                                                       satellite_cap, config.satellite_initial_weight + config.satellite_add_one_weight + config.satellite_add_two_weight * fusion["multiplier"])))
-        if setup_exists and fusion["hard_block"] and not actions:
-            actions.append(("HOLD", "MODEL_HARD_BLOCK", _position_weight(state, feature["price"])))
+                                                                                       satellite_cap, config.satellite_initial_weight + config.satellite_add_one_weight + config.satellite_add_two_weight)))
         fill_price = float(fill["price"])
         executed = []
         for action, reason, target_weight in actions:
@@ -552,7 +400,6 @@ def replay(rows: list[dict], *, start: date, end: date, tool_url: str,
                        "add_candidate": add_kind, "valuation_center": round(feature["valuation_center"], 4), "valuation_z": round(feature["valuation_z"], 3),
                        "macro_score": feature["macro_score"], "macro_multiplier": macro_multiplier,
                        "value_to_core_reclassification": {"grams": round(promoted_grams, 8), "notional": round(promoted_notional, 2)},
-                       "analysis_context": context, "analyses": _analysis_audit(panel), "model_fusion": fusion,
                        "executed": executed or ["HOLD"], "reason": [item[1] for item in actions]})
     if first_signal_index is None:
         raise ValueError("no eligible signal sessions in the requested period")
@@ -566,20 +413,6 @@ def replay(rows: list[dict], *, start: date, end: date, tool_url: str,
     benchmark_entry = float(rows[first_signal_index + 1]["price"])
     buy_hold_value = INITIAL_CASH / benchmark_entry * last_price
     realized_fees = sum(float(trade["fee"]) for trade in trades)
-    model_fusions = [event["model_fusion"] for event in events if event["analyses"]]
-    model_review = {
-        "enabled": False,
-        "mode": "explanation_only",
-        "candidate_reviews": len(model_fusions),
-        "role_calls": model_calls,
-        "hard_blocks": sum(1 for fusion in model_fusions if fusion["hard_block"]),
-        "size_reductions": sum(1 for fusion in model_fusions if 0 < fusion["multiplier"] < 1),
-        "full_size_approvals": sum(1 for fusion in model_fusions if fusion["multiplier"] == 1),
-        "provider_unavailable_blocks": sum(
-            1 for event in events
-            if event["analyses"] and event["analyses"].get("risk_skeptic", {}).get("reason_codes") == ["MODEL_REVIEW_UNAVAILABLE"]
-        ),
-    }
     return {
         "strategy": config.strategy_name,
         "target_period": {"start": start.isoformat(), "end": end.isoformat()},
@@ -608,8 +441,6 @@ def replay(rows: list[dict], *, start: date, end: date, tool_url: str,
         "trade_count": len(trades),
         "realized_fees_paid": round(realized_fees, 2),
         "fees_paid": round(realized_fees, 2),
-        "model_calls": model_calls,
-        "model_review": model_review,
         "trades": trades,
         "events": events,
         "limitations": [
@@ -620,9 +451,9 @@ def replay(rows: list[dict], *, start: date, end: date, tool_url: str,
     }
 
 
-def replay_v4(rows: list[dict], *, start: date, end: date, tool_url: str = "unused") -> dict:
-    """Run the frozen v4 fee-aware satellite configuration without any LLM input."""
-    return replay(rows, start=start, end=end, tool_url=tool_url, use_deepseek=False, config=SwingV4Config())
+def replay_v4(rows: list[dict], *, start: date, end: date) -> dict:
+    """Run the frozen v4 fee-aware satellite configuration."""
+    return replay(rows, start=start, end=end, config=SwingV4Config())
 
 
 def main() -> None:
@@ -630,11 +461,9 @@ def main() -> None:
     parser.add_argument("--start", type=date.fromisoformat, required=True)
     parser.add_argument("--end", type=date.fromisoformat, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--no-deepseek", action="store_true")
-    parser.add_argument("--tool-url", default="http://127.0.0.1:8000/api/v1/internal/research/gold-blind-decision")
     args = parser.parse_args()
     panel = collect_factor_panel(start=args.start - timedelta(days=400), end=args.end)
-    result = replay(_daily_rows(panel), start=args.start, end=args.end, tool_url=args.tool_url, use_deepseek=False)
+    result = replay(_daily_rows(panel), start=args.start, end=args.end)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     print(args.output.resolve())
