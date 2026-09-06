@@ -10,7 +10,7 @@ from tools.deepseek_blind_gold_tool import invoke
 from demos.gold_factor_lab.factor_calibration import calibrate
 from demos.gold_factor_lab.evaluation_report import build_html as build_evaluation_html
 from demos.gold_factor_lab.swing_replay import replay as swing_replay
-from demos.gold_factor_lab.swing_v3 import PositionState, _promote_value_to_core, _standardised_observations, _trim_core, entry_kind as swing_v3_entry_kind, features as swing_v3_features, replay as swing_v3_replay
+from demos.gold_factor_lab.swing_v3 import PositionState, SwingV4Config, _promote_value_to_core, _standardised_observations, _trim_core, entry_kind as swing_v3_entry_kind, features as swing_v3_features, replay as swing_v3_replay, replay_v4
 from src.quant_research.contracts import BlindGoldAnalysisContext
 from src.quant_research.intelligence import analyse_blind_gold
 
@@ -308,6 +308,16 @@ def test_swing_v3_rejects_model_participation_in_trade_decisions():
         assert "explanation-only" in str(exc)
     else:
         raise AssertionError("swing-v3 accepted a model decision path")
+
+
+def test_swing_v4_removes_the_second_satellite_add_and_caps_the_first_add():
+    rows = _v3_rows([100 * 1.002 ** index for index in range(155)])
+    result = replay_v4(rows, start=date.fromisoformat(rows[120]["observed_on"]), end=date.fromisoformat(rows[150]["observed_on"]))
+    assert result["strategy"] == "swing_v4_fee_aware_valuation_capped_satellite"
+    assert not any(item["action"] == "ADD_SATELLITE_TWO" for item in result["trades"])
+    assert SwingV4Config().satellite_initial_weight == 0.25
+    assert SwingV4Config().satellite_add_one_weight == 0.15
+    assert SwingV4Config().satellite_add_two_weight == 0.0
 
 
 def test_swing_v3_blocks_entries_during_a_recent_downside_shock():

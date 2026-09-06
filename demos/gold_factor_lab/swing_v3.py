@@ -59,6 +59,19 @@ class SwingV3Config:
     downside_shock_sigma: float = 1.75
     shock_cooldown_sessions: int = 3
     minimum_trade_notional: float = 1_000.0
+    satellite_add_max_valuation_z: float = float("inf")
+    strategy_name: str = "swing_v3_core_satellite_volatility_targeted"
+
+
+@dataclass(frozen=True)
+class SwingV4Config(SwingV3Config):
+    """Lower-turnover satellite variant; v3 remains reproducible unchanged."""
+
+    satellite_initial_weight: float = 0.25
+    satellite_add_one_weight: float = 0.15
+    satellite_add_two_weight: float = 0.0
+    satellite_add_max_valuation_z: float = 1.0
+    strategy_name: str = "swing_v4_fee_aware_valuation_capped_satellite"
 
 
 @dataclass
@@ -457,9 +470,9 @@ def replay(rows: list[dict], *, start: date, end: date, tool_url: str,
         add_kind = "none"
         if state.satellite_grams and not satellite_exit_reason and feature["uptrend"]:
             profitable = feature["price"] >= state.satellite_average_entry * (1 + config.add_profit_sigma * state.satellite_entry_volatility)
-            if state.add_stage == 0 and profitable:
+            if state.add_stage == 0 and profitable and feature["valuation_z"] <= config.satellite_add_max_valuation_z:
                 add_kind = "add_one"
-            elif state.add_stage == 1 and candidate == "breakout" and feature["macro_score"] >= 1:
+            elif state.add_stage == 1 and config.satellite_add_two_weight > 0 and candidate == "breakout" and feature["macro_score"] >= 1:
                 add_kind = "add_two"
         satellite_setup = (not state.satellite_grams and candidate != "none") or add_kind != "none"
         setup_exists = core_entry or value_entry or value_add or satellite_setup
@@ -568,7 +581,7 @@ def replay(rows: list[dict], *, start: date, end: date, tool_url: str,
         ),
     }
     return {
-        "strategy": "swing_v3_core_satellite_volatility_targeted",
+        "strategy": config.strategy_name,
         "target_period": {"start": start.isoformat(), "end": end.isoformat()},
         "contract": {"signal": "daily close", "execution": "next observed daily quote", "buy_fee_rate": 0.0,
                      "sell_fee_rate": config.sell_fee, "terminal_valuation": "mark-to-market at final observed quote; no hypothetical sale"},
@@ -577,7 +590,7 @@ def replay(rows: list[dict], *, start: date, end: date, tool_url: str,
             "value": "15% value allocation opens after a stabilised discount below a 120-session median; one 15% add only at a deeper discount; it exits only when premium and short-trend weakness coincide",
             "trend_safety": "a downside shock of 1.75 times 20-session volatility starts a three-session no-entry cooldown; after that, the latest two closes must both be above their EMA5 and EMA5 must be rising",
             "satellite_entry": "after the trend-safety gate, price > EMA20 > SMA60 with positive EMA20 slope, then either 20-session breakout >0.25 sigma or pullback reclaim",
-            "satellite_sizing": "35% initial satellite; adds only after a profitable 0.75-sigma move and then a supported breakout",
+            "satellite_sizing": f"{config.satellite_initial_weight:.0%} initial satellite; first add is capped at {config.satellite_add_one_weight:.0%}; second add is {config.satellite_add_two_weight:.0%}; new adds require valuation z <= {config.satellite_add_max_valuation_z}",
             "satellite_exit": "1.5-sigma initial stop, activated 2-sigma trailing stop, two closes below EMA20, trend failure, or 20-session no-progress de-risk",
             "model": "DeepSeek is explanation-only; it cannot influence entries, exits, or position sizing",
             "macro": "macro context multiplies target weight (50/75/100%) rather than vetoing a technical setup",
@@ -605,6 +618,11 @@ def replay(rows: list[dict], *, start: date, end: date, tool_url: str,
             "Use an untouched future period for a final out-of-sample comparison; do not tune against that held-out period.",
         ],
     }
+
+
+def replay_v4(rows: list[dict], *, start: date, end: date, tool_url: str = "unused") -> dict:
+    """Run the frozen v4 fee-aware satellite configuration without any LLM input."""
+    return replay(rows, start=start, end=end, tool_url=tool_url, use_deepseek=False, config=SwingV4Config())
 
 
 def main() -> None:
